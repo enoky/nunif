@@ -1,3 +1,4 @@
+import copy
 import sys
 from os import path
 from time import time
@@ -20,6 +21,11 @@ from .window_state import load_state, save_state, is_valid_size, is_visible_posi
 
 PREVIEW_SCALES = (100, 50, 25)
 SEEK_TICKS = 1000
+# a slider tick becomes one frame once the frame rate is known, so the arrow
+# keys step frames. The cap keeps the range sane for very long files.
+MAX_SEEK_TICKS = 500000
+# dragging the slider fires continuously; renders wait for it to settle
+SEEK_DEBOUNCE_MS = 150
 POLL_INTERVAL_MS = 400
 SAME_AS_MAIN = "Same as main"
 EMA_NOTE = "Flicker Reduction works across frames, so a single frame cannot show it."
@@ -81,6 +87,8 @@ class PreviewFrame(wx.Frame):
         self.worker = RenderWorker(self.render, self.on_render_done, self.on_render_error)
         self.applied_snapshot = None
         self.pending_snapshot = None
+        self.cached_args = None
+        self.cached_args_snapshot = None
         self.SetMinSize((900, 420))
 
         self.initialize_component()
@@ -173,6 +181,7 @@ class PreviewFrame(wx.Frame):
         self.btn_save.Bind(wx.EVT_BUTTON, self.on_click_btn_save)
         self.btn_free_vram.Bind(wx.EVT_BUTTON, self.on_click_btn_free_vram)
         self.sld_seek.Bind(wx.EVT_SLIDER, self.on_changed_seek)
+        self.sld_seek.Bind(wx.EVT_SCROLL_THUMBRELEASE, self.on_seek_released)
         self.Bind(wx.EVT_ACTIVATE, self.on_activate)
         self.Bind(wx.EVT_CLOSE, self.on_close)
 
@@ -180,6 +189,10 @@ class PreviewFrame(wx.Frame):
         self.poll_timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, self.on_poll_timer, self.poll_timer)
         self.poll_timer.Start(POLL_INTERVAL_MS)
+
+        # renders the frame once the slider stops moving
+        self.seek_timer = wx.Timer(self)
+        self.Bind(wx.EVT_TIMER, self.on_seek_timer, self.seek_timer)
 
         # controls that operate on a rendered image stay disabled until there is one
         self.update_image_controls()
@@ -266,7 +279,25 @@ class PreviewFrame(wx.Frame):
         return self.source_start + (self.source_end - self.source_start) * self.seek_position
 
     def seek_label(self):
-        return f"{format_time(self.seek_seconds())} / {format_time(self.source_end)}"
+        label = f"{format_time(self.seek_seconds())} / {format_time(self.source_end)}"
+        if self.source_end is not None and self.sld_seek.GetMax() != SEEK_TICKS:
+            # ticks are frames
+            label += f"  [{self.sld_seek.GetValue()}]"
+        return label
+
+    def update_seek_range(self, info):
+        """One tick per frame, so the arrow keys step a frame at a time."""
+        if not (info.is_video and info.fps and info.start_time is not None):
+            return
+        frames = int(round((info.end_time - info.start_time) * info.fps))
+        frames = max(1, min(frames, MAX_SEEK_TICKS))
+        if self.sld_seek.GetMax() == frames:
+            return
+        self.sld_seek.SetRange(0, frames)
+        self.sld_seek.SetValue(int(round(self.seek_position * frames)))
+
+    def seek_ticks(self):
+        return max(1, self.sld_seek.GetMax())
 
     def update_image_controls(self):
         enable = self.canvas.has_image()
@@ -319,17 +350,45 @@ class PreviewFrame(wx.Frame):
         finally:
             del self.main_frame.show_validation_error_message
 
+    def current_args(self, silent):
+        """
+        The current settings, reparsed only when they have actually changed.
+
+        parse_args() costs about 175 ms here, which is far too much to spend on
+        the GUI thread for every frame of a scrub. The snapshot that drives
+        auto-refresh answers the same question in 0.3 ms, so it decides when a
+        reparse is needed.
+        """
+        snapshot = self.take_snapshot()
+        if self.cached_args is not None and snapshot == self.cached_args_snapshot:
+            return copy.copy(self.cached_args)
+
+        args = self.parse_args(silent=silent)
+        if args is None:
+            return None
+        self.cached_args = args
+        self.cached_args_snapshot = snapshot
+        return copy.copy(args)
+
+    def invalidate_args(self):
+        self.cached_args = None
+        self.cached_args_snapshot = None
+
     def request_render(self, silent=False):
         if self.main_frame.processing:
             self.set_status(T("A conversion is running. Preview is paused until it finishes."))
             return
 
-        args = self.parse_args(silent=silent)
+        args = self.current_args(silent=silent)
         if args is None:
             # do not retry until something changes
             self.applied_snapshot = self.pending_snapshot = self.take_snapshot()
             self.set_status(T("Check the settings"))
             return
+
+        # a copied Namespace still shares its state dict, and the override below
+        # writes into it
+        args.state = dict(args.state)
 
         # keep the preview and the main window from cancelling each other
         args.state["stop_event"] = self.worker.stop_event
@@ -423,6 +482,7 @@ class PreviewFrame(wx.Frame):
         if info.is_video:
             self.source_start = info.start_time
             self.source_end = info.end_time
+            self.update_seek_range(info)
             self.lbl_seek.SetLabel(self.seek_label())
 
         message = T(result.note) if result.note else path.basename(info.file_path)
@@ -482,10 +542,19 @@ class PreviewFrame(wx.Frame):
             self.request_render()
 
     def on_changed_seek(self, event):
-        self.seek_position = self.sld_seek.GetValue() / SEEK_TICKS
+        # the label follows the slider immediately; the render waits for the
+        # drag to settle, since each one costs a decode and an inference
+        self.seek_position = self.sld_seek.GetValue() / self.seek_ticks()
         self.lbl_seek.SetLabel(self.seek_label())
-        if self.auto_refresh:
-            self.request_render()
+        self.seek_timer.StartOnce(SEEK_DEBOUNCE_MS)
+
+    def on_seek_released(self, event):
+        self.seek_timer.Stop()
+        self.request_render(silent=True)
+        event.Skip()
+
+    def on_seek_timer(self, event):
+        self.request_render(silent=True)
 
     def on_click_btn_zoom_fit(self, event):
         self.canvas.fit_to_window()
@@ -525,6 +594,8 @@ class PreviewFrame(wx.Frame):
         self.set_status(T("Freed the loaded models"))
 
     def free_models(self, include_depth_model=False):
+        # the cached args hold the model instances in their state dict
+        self.invalidate_args()
         self.model_cache.clear()
         if self.worker.is_busy():
             self.video_cache.release()
@@ -555,6 +626,7 @@ class PreviewFrame(wx.Frame):
             self.on_close_callback()
             self.on_close_callback = None
         self.poll_timer.Stop()
+        self.seek_timer.Stop()
         self.render_seq += 1  # discard anything still in flight
         # short join: an idle worker exits at once, and a busy one is a daemon
         # thread that only holds references, so waiting on it would just freeze

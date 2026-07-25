@@ -18,6 +18,7 @@ Three differences from a full conversion are unavoidable in a still preview:
 - With Auto Crop on, the crop comes from this frame alone, where a conversion
   derives one crop from an analysis pass over the whole file.
 """
+import sys
 import threading
 from collections import deque
 import av
@@ -34,6 +35,11 @@ from .pipeline import PreviewError
 # a keyframe interval this long is already unusual; the cap only exists so a
 # broken index cannot spin forever
 MAX_SCAN_FRAMES = 900
+
+# how far ahead the decoder will run on rather than seek. Seeking costs a
+# re-decode from the previous keyframe, so stepping or scrubbing forwards is
+# much cheaper continued than restarted.
+FORWARD_CONTINUE_SECONDS = 4.0
 
 
 def source_key(file_path, args, device):
@@ -115,6 +121,12 @@ class VideoSource():
         except Exception:  # noqa
             self.fps = 0.0
 
+        # where the decoder currently is, and the frames it has just passed, so
+        # that a forward scrub can continue instead of seeking
+        self.last_pts = None
+        self.recent = deque(maxlen=0)
+        self.recent_short_side = None
+
     def _open(self, file_path, hwaccel, device):
         return av.open(
             file_path, mode="r", metadata_errors="ignore",
@@ -147,6 +159,19 @@ class VideoSource():
         # a little extra: seeking lands on the keyframe at or before this
         return max(0.0, target_sec - (warmup + 2) / self.fps)
 
+    def _prepare_history(self, warmup, short_side):
+        """The rolling history of decoded frames, kept for the temporal models."""
+        if self.recent.maxlen != warmup or self.recent_short_side != short_side:
+            self.recent = deque(maxlen=warmup)
+            self.recent_short_side = short_side
+
+    def _can_continue(self, target_pts):
+        """True when the target is just ahead of the decoder's position."""
+        if self.last_pts is None or self.stream.time_base is None:
+            return False
+        limit = FORWARD_CONTINUE_SECONDS / self.stream.time_base
+        return self.last_pts < target_pts <= self.last_pts + limit
+
     def _shrink(self, x, short_side):
         if not short_side:
             return x
@@ -161,15 +186,19 @@ class VideoSource():
     def _decode_at(self, target_sec, warmup=0, warmup_short_side=None):
         time_base = self.stream.time_base
         target_pts = int(target_sec / time_base) if time_base else 0
-        seek_pts = int(self._seek_seconds(target_sec, warmup) / time_base) if time_base else 0
+        self._prepare_history(warmup, warmup_short_side)
 
-        try:
-            self.container.seek(seek_pts, stream=self.stream, backward=True, any_frame=False)
-        except Exception:  # noqa
-            # unseekable input: fall back to decoding from wherever it is
-            pass
+        if not self._can_continue(target_pts):
+            seek_pts = int(self._seek_seconds(target_sec, warmup) / time_base) if time_base else 0
+            try:
+                self.container.seek(seek_pts, stream=self.stream, backward=True, any_frame=False)
+            except Exception:  # noqa
+                # unseekable input: fall back to decoding from wherever it is
+                pass
+            # the history belongs to wherever the decoder used to be
+            self.recent.clear()
+            self.last_pts = None
 
-        preceding = deque(maxlen=warmup) if warmup > 0 else None
         last_frame = None
         scanned = 0
         for packet in self.container.demux([self.stream]):
@@ -181,17 +210,20 @@ class VideoSource():
                 reached = frame.pts >= target_pts
                 for out_frame in self.preprocessor.update(frame):
                     last_frame = out_frame
+                    self.last_pts = frame.pts
                     if reached:
-                        return to_tensor(last_frame, device=self.device), list(preceding or [])
-                    if preceding is not None:
-                        preceding.append(
+                        return to_tensor(last_frame, device=self.device), list(self.recent)
+                    if warmup > 0:
+                        self.recent.append(
                             self._shrink(to_tensor(out_frame, device=self.device), warmup_short_side))
             if scanned > MAX_SCAN_FRAMES:
+                print(f"iw3_ext: gave up seeking to {target_sec:.1f}s after {scanned} frames",
+                      file=sys.stderr)
                 break
 
         if last_frame is None:
             raise PreviewError(f"Could not decode a frame at {target_sec:.1f}s")
-        return to_tensor(last_frame, device=self.device), list(preceding or [])
+        return to_tensor(last_frame, device=self.device), list(self.recent)
 
     def close(self):
         container = getattr(self, "container", None)

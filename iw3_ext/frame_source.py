@@ -9,16 +9,17 @@ from .pipeline import PreviewError
 class SourceInfo():
     """What the window needs to know about the frame that was rendered."""
 
-    __slots__ = ("file_path", "is_video", "position", "start_time", "end_time", "duration")
+    __slots__ = ("file_path", "is_video", "position", "start_time", "end_time", "duration", "fps")
 
     def __init__(self, file_path, is_video=False, position=None,
-                 start_time=None, end_time=None, duration=None):
+                 start_time=None, end_time=None, duration=None, fps=None):
         self.file_path = file_path
         self.is_video = is_video
         self.position = position
         self.start_time = start_time
         self.end_time = end_time
         self.duration = duration
+        self.fps = fps
 
 
 def resolve_source_path(input_path):
@@ -75,7 +76,7 @@ def load_source_frame(file_path, args, device, scale=100, seek=0.0, video_cache=
             seek, warmup=warmup, warmup_short_side=warmup_short_side)
         info = SourceInfo(file_path, is_video=True, position=position,
                           start_time=source.start_time, end_time=source.end_time,
-                          duration=source.duration)
+                          duration=source.duration, fps=source.fps)
         return scale_source(x, scale), warmup_frames, info
 
     im, _ = load_image_simple(file_path, color="rgb",

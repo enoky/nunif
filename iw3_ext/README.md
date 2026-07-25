@@ -41,6 +41,7 @@ git diff --stat dev -- . ":(exclude)iw3_ext"
 | 4 | Auto-refresh on main-window setting changes, preview-only depth model | done |
 | 5 | Persisted window state, translations | done |
 | 6 | Previewing with the VideoDepthAnything models | done |
+| 7 | Timeline scrubbing | done |
 
 With `Auto` on, the window watches the main window and re-renders about half a
 second after a setting stops changing. It does that by walking the controls
@@ -86,6 +87,25 @@ The rendered frame is byte-identical to what `Start` writes for that frame: a
 the same settings compared at a max absolute difference of 0. Video frames are
 decoded through the same path a conversion uses, verified against `hook_frame()`
 at several seek positions, also at a max absolute difference of 0.
+
+## Scrubbing
+
+One slider tick is one frame once the frame rate is known, so the arrow keys
+step a frame at a time and the label shows the frame index. Dragging updates the
+label immediately and renders once the slider settles, whether or not `Auto` is
+on: moving the timeline is an explicit request for another frame.
+
+| | before | after |
+| --- | --- | --- |
+| GUI thread per drag event | 175 ms | 0.26 ms |
+| reading the settings for a render | 101 ms | 0.27 ms |
+| decoding one frame forward | 1.1 ms | 0.2 ms |
+
+`parse_args()` costs about 175 ms, so calling it per slider tick made a drag
+unusable. It is now reparsed only when the settings snapshot actually changes,
+and the decoder runs on rather than seeking when the next frame is just ahead,
+which avoids re-decoding from the previous keyframe. A backward jump still
+seeks, and still lands on the exact frame.
 
 For video the slider spans the Start/End time range when one is set. Three things
 a still preview cannot reproduce are listed at the top of `video_source.py`:
