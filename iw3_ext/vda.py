@@ -22,6 +22,7 @@ at scene boundaries, so treat this as a close approximation rather than the
 byte-exact preview the image models give.
 """
 import torch
+from torchvision.transforms import functional as TF, InterpolationMode
 
 
 STREAMING_MODEL_NAME = "VideoDepthAnythingStreaming"
@@ -93,6 +94,32 @@ def warmup_frame_size(args):
     return lower_bound
 
 
+def align_frames(frames):
+    """
+    Brings every frame in a window to one size.
+
+    batch_preprocess() resizes the whole batch to a single size worked out from
+    its dimensions, so a batch of mixed sizes cannot even be stacked. The
+    warmup frames were already brought down to the model's short side, and that
+    is the size the model resizes to anyway, so the previewed frame is matched
+    to them rather than the other way around: matching upwards would put the
+    whole window in VRAM at source resolution.
+    """
+    if len(frames) < 2:
+        return frames
+
+    size = frames[0].shape[-2:]
+    if all(frame.shape[-2:] == size for frame in frames):
+        return frames
+
+    return [
+        frame if frame.shape[-2:] == size else
+        TF.resize(frame, list(size), interpolation=InterpolationMode.BICUBIC,
+                  antialias=True).clamp(0, 1)
+        for frame in frames
+    ]
+
+
 class VDAOnlineAdapter():
     """
     Gives VideoDepthAnythingModel the infer() that process_image() expects.
@@ -117,7 +144,7 @@ class VDAOnlineAdapter():
 
         frames = [frame.to(x.device) for frame in self._warmup_frames]
         frames.append(x)
-        batch = torch.stack(frames)
+        batch = torch.stack(align_frames(frames))
 
         # no scene boundaries: an empty reset_pts means no mid-window flush
         outputs = depth_model.infer_with_normalize(
