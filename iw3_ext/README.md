@@ -106,6 +106,15 @@ written as 29.97 and one written as 30 cannot drift apart over a long clip.
 Different resolutions are fine. A different aspect ratio is reported in the
 status bar rather than silently stretched.
 
+A depth map larger than a depth model would have produced is brought down
+first. The warp takes its sampling grid and delta scale from the depth's own
+width, and the inpaint methods resize only the colour frame, so the warp
+networks see the depth at whatever resolution it arrives in and stripe badly
+outside the range they were trained for. Measured on a 1920x1036 frame with
+`mlbw_l2_inpaint`, the same depth content scored 0.36 for horizontal noise at
+518 lines, 3.09 at 700 and 7.32 at full frame. Files written at a sensible
+resolution, which most are, are left untouched.
+
 Two things it does not do: Auto Crop cannot be honoured, because
 `process_image()` derives the crop from the colour frame and the depth would
 need the identical one; and `Start` still converts with the depth model, since

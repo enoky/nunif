@@ -36,6 +36,56 @@ MODEL_TYPE = "DepthFile"
 # probably not the same framing, and stretching it would bend the geometry
 ASPECT_TOLERANCE = 0.01
 
+# The sizing rule from depth_anything_model.batch_preprocess().
+#
+# The warp takes its sampling grid and delta scale from the depth map's own
+# width, and the inpaint methods resize only the colour frame
+# (base_inpaint.py), so the warp networks see the depth at whatever resolution
+# it arrives in. They are trained around what a depth model emits, and degrade
+# well outside it: on a 1920x1036 frame, the same depth content measured
+# 0.36 for horizontal noise at 518 lines, 3.09 at 700, and 7.32 at full frame,
+# the last being the vertical striping this avoids.
+#
+# Depth files are normally written at a sensible resolution already, so one is
+# only brought down when it is larger than a model would have produced.
+PREP_MULTIPLE = 14
+MIN_RESOLUTION = 224
+DEFAULT_LOWER_BOUND = 392
+
+
+def model_depth_size(height, width, args):
+    """The shape a depth model would have returned for a frame this size."""
+    lower_bound = getattr(args, "resolution", None) or DEFAULT_LOWER_BOUND
+    if getattr(args, "limit_resolution", False) and lower_bound > min(width, height):
+        lower_bound = min(width, height)
+        lower_bound -= lower_bound % PREP_MULTIPLE
+        lower_bound = max(lower_bound, MIN_RESOLUTION)
+    if lower_bound % PREP_MULTIPLE != 0:
+        lower_bound += PREP_MULTIPLE - lower_bound % PREP_MULTIPLE
+
+    scale = lower_bound / min(width, height)
+    size = []
+    for value in (height, width):
+        scaled = int(value * scale)
+        scaled -= scaled % PREP_MULTIPLE
+        size.append(max(scaled, lower_bound))
+    return size[0], size[1]
+
+
+def oversized_depth_size(depth_shape, frame_shape, args):
+    """
+    The shape to bring a depth map down to, or None to leave it alone.
+
+    Its own aspect ratio is kept: a mismatch with the colour frame is reported
+    rather than corrected, and the warp stretches the two together anyway.
+    """
+    limit = min(model_depth_size(frame_shape[-2], frame_shape[-1], args))
+    height, width = depth_shape[-2:]
+    if min(height, width) <= limit:
+        return None
+    scale = limit / min(height, width)
+    return max(1, int(height * scale)), max(1, int(width * scale))
+
 
 def depth_source_args(args):
     """
@@ -107,6 +157,7 @@ class FileDepthModel(BaseDepthModel):
         self.frame = None
         self.rotate_left = False
         self.rotate_right = False
+        self.args = None
         self.aspect_mismatch = False
 
     def set_frame(self, depth, args):
@@ -115,6 +166,7 @@ class FileDepthModel(BaseDepthModel):
         # infer() sees it, so the depth has to turn with it
         self.rotate_left = bool(getattr(args, "rotate_left", False))
         self.rotate_right = bool(getattr(args, "rotate_right", False))
+        self.args = args
         self.aspect_mismatch = False
 
     def load_model(self, model_type, resolution=None, device=None, **kwargs):
@@ -132,13 +184,16 @@ class FileDepthModel(BaseDepthModel):
         elif self.rotate_right:
             depth = torch.rot90(depth, 3, (-2, -1))
 
-        if depth.shape[-2:] != x.shape[-2:]:
+        if aspect_ratio(x.shape):
             self.aspect_mismatch = (
-                abs(aspect_ratio(depth.shape) / aspect_ratio(x.shape) - 1.0) > ASPECT_TOLERANCE
-                if aspect_ratio(x.shape) else False)
-            depth = F.interpolate(depth.unsqueeze(0), size=tuple(x.shape[-2:]),
+                abs(aspect_ratio(depth.shape) / aspect_ratio(x.shape) - 1.0) > ASPECT_TOLERANCE)
+
+        # only if it is larger than a depth model would have produced
+        target = oversized_depth_size(depth.shape, x.shape, self.args)
+        if target is not None:
+            depth = F.interpolate(depth.unsqueeze(0), size=target,
                                   mode="bilinear", align_corners=False,
-                                  antialias=True).squeeze(0)
+                                  antialias=True).squeeze(0).clamp(0, 1)
 
         if edge_dilation_is_enabled(edge_dilation):
             depth = dilate_edge(depth.unsqueeze(0), edge_dilation).squeeze(0)
