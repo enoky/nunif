@@ -127,6 +127,10 @@ class VideoSource():
         self.last_pts = None
         self.recent = deque(maxlen=0)
         self.recent_short_side = None
+        # the demuxer is kept between reads, and frames decoded but not handed
+        # out wait here rather than being dropped
+        self.demuxer = None
+        self.queue = []
 
     def _open(self, file_path, hwaccel, device):
         return av.open(
@@ -224,6 +228,8 @@ class VideoSource():
         except av.FFmpegError:
             self.last_pts = None
             self.recent.clear()
+            self.queue.clear()
+            self.demuxer = None
             return self._scan(target_sec, warmup, warmup_short_side)
 
     def _scan(self, target_sec, warmup=0, warmup_short_side=None):
@@ -238,35 +244,62 @@ class VideoSource():
             except Exception:  # noqa
                 # unseekable input: fall back to decoding from wherever it is
                 pass
-            # the history belongs to wherever the decoder used to be
+            # the history and anything queued belong to wherever the decoder
+            # used to be, and the demuxer has to restart from the seek
             self.recent.clear()
+            self.queue.clear()
+            self.demuxer = None
             self.last_pts = None
 
         last_frame = None
+        for pts, out_frame in self._decoded_frames(target_sec):
+            last_frame = out_frame
+            self.last_pts = pts
+            if pts >= target_pts:
+                return to_tensor(out_frame, device=self.device), list(self.recent)
+            if warmup > 0:
+                self.recent.append(
+                    self._shrink(to_tensor(out_frame, device=self.device), warmup_short_side))
+
+        if last_frame is None:
+            raise PreviewError(f"Could not decode a frame at {target_sec:.1f}s")
+        return to_tensor(last_frame, device=self.device), list(self.recent)
+
+    def _decoded_frames(self, target_sec):
+        """
+        Yields (pts, frame) from where the decoder is.
+
+        A packet can decode to more than one frame, which is what happens when
+        the reorder buffer flushes at a keyframe. Everything a packet produces
+        is put on the queue before any of it is handed out, so a caller that
+        stops early leaves the rest for the next read instead of dropping it,
+        and the demuxer is kept rather than restarted so its position is not
+        lost between reads.
+        """
         scanned = 0
-        for packet in self.container.demux([self.stream]):
+        while True:
+            while self.queue:
+                yield self.queue.pop(0)
+
+            if self.demuxer is None:
+                self.demuxer = self.container.demux([self.stream])
+            try:
+                packet = next(self.demuxer)
+            except StopIteration:
+                return
+
             for frame in safe_decode(packet, strict=self.strict):
                 if frame.pts is None:
                     continue
                 frame = fix_frame_color_av17(frame, self.sw_format)
                 scanned += 1
-                reached = frame.pts >= target_pts
                 for out_frame in self.preprocessor.update(frame):
-                    last_frame = out_frame
-                    self.last_pts = frame.pts
-                    if reached:
-                        return to_tensor(last_frame, device=self.device), list(self.recent)
-                    if warmup > 0:
-                        self.recent.append(
-                            self._shrink(to_tensor(out_frame, device=self.device), warmup_short_side))
-            if scanned > MAX_SCAN_FRAMES:
+                    self.queue.append((frame.pts, out_frame))
+
+            if scanned > MAX_SCAN_FRAMES and not self.queue:
                 print(f"iw3_ext: gave up seeking to {target_sec:.1f}s after {scanned} frames",
                       file=sys.stderr)
-                break
-
-        if last_frame is None:
-            raise PreviewError(f"Could not decode a frame at {target_sec:.1f}s")
-        return to_tensor(last_frame, device=self.device), list(self.recent)
+                return
 
     def close(self):
         container = getattr(self, "container", None)
