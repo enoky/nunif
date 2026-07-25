@@ -204,6 +204,19 @@ class VideoSource():
                          interpolation=InterpolationMode.BILINEAR, antialias=True)
 
     def _decode_at(self, target_sec, warmup=0, warmup_short_side=None):
+        """
+        Reading to the end of the file leaves the decoder at EOF, and every
+        later decode raises from there. Seeking resets it, so one retry from a
+        seek recovers rather than failing the render.
+        """
+        try:
+            return self._scan(target_sec, warmup, warmup_short_side)
+        except av.FFmpegError:
+            self.last_pts = None
+            self.recent.clear()
+            return self._scan(target_sec, warmup, warmup_short_side)
+
+    def _scan(self, target_sec, warmup=0, warmup_short_side=None):
         time_base = self.stream.time_base
         target_pts = int(target_sec / time_base) if time_base else 0
         self._prepare_history(warmup, warmup_short_side)

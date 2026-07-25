@@ -21,6 +21,7 @@ Alignment is by frame index, not timestamp, so a frame rate written as 29.97 in
 one file and 30 in the other cannot drift apart over a long clip.
 """
 import copy
+import threading
 from os import path
 import torch
 import torch.nn.functional as F
@@ -159,6 +160,22 @@ class FileDepthModel(BaseDepthModel):
         self.rotate_right = False
         self.args = None
         self.aspect_mismatch = False
+        # conversion only: the whole depth file, read by frame index, with the
+        # index for the batch in hand held per thread because iw3 runs the
+        # frame callbacks concurrently
+        self.stream = None
+        self.pending = threading.local()
+
+    def set_stream(self, stream):
+        self.stream = stream
+
+    def set_pending(self, indices):
+        self.pending.indices = indices
+
+    def take_pending(self):
+        indices = getattr(self.pending, "indices", None)
+        self.pending.indices = None
+        return indices
 
     def set_frame(self, depth, args):
         self.frame = depth
@@ -175,10 +192,21 @@ class FileDepthModel(BaseDepthModel):
 
     def infer(self, x, tta=False, low_vram=False, enable_amp=True,
               edge_dilation=0, depth_aa=False, **kwargs):
-        if self.frame is None:
+        if self.stream is not None:
+            # a conversion: the frame index came down with the batch
+            from .depth_conversion import frames_for
+            depth = frames_for(self, x)
+        elif self.frame is not None:
+            depth = self.frame
+        else:
             raise PreviewError("No depth frame was loaded")
 
-        depth = self.frame.to(x.device)
+        # a conversion infers a batch at a time, a preview one frame
+        batch = x.ndim == 4
+        depth = depth.to(x.device)
+        if depth.ndim == 3:
+            depth = depth.unsqueeze(0)
+
         if self.rotate_left:
             depth = torch.rot90(depth, 1, (-2, -1))
         elif self.rotate_right:
@@ -191,14 +219,13 @@ class FileDepthModel(BaseDepthModel):
         # only if it is larger than a depth model would have produced
         target = oversized_depth_size(depth.shape, x.shape, self.args)
         if target is not None:
-            depth = F.interpolate(depth.unsqueeze(0), size=target,
-                                  mode="bilinear", align_corners=False,
-                                  antialias=True).squeeze(0).clamp(0, 1)
+            depth = F.interpolate(depth, size=target, mode="bilinear",
+                                  align_corners=False, antialias=True).clamp(0, 1)
 
         if edge_dilation_is_enabled(edge_dilation):
-            depth = dilate_edge(depth.unsqueeze(0), edge_dilation).squeeze(0)
+            depth = dilate_edge(depth, edge_dilation)
 
-        return depth
+        return depth if batch else depth.squeeze(0)
 
     @classmethod
     def get_name(cls):

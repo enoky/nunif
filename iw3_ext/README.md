@@ -43,6 +43,7 @@ git diff --stat dev -- . ":(exclude)iw3_ext"
 | 6 | Previewing with the VideoDepthAnything models | done |
 | 7 | Timeline scrubbing | done |
 | 8 | Importing pre-rendered depth maps | done |
+| 9 | Converting with a depth file | done |
 
 With `Auto` on, the window watches the main window and re-renders about half a
 second after a setting stops changing. It does that by walking the controls
@@ -115,10 +116,39 @@ outside the range they were trained for. Measured on a 1920x1036 frame with
 518 lines, 3.09 at 700 and 7.32 at full frame. Files written at a sensible
 resolution, which most are, are left untouched.
 
-Two things it does not do: Auto Crop cannot be honoured, because
-`process_image()` derives the crop from the colour frame and the depth would
-need the identical one; and `Start` still converts with the depth model, since
-this is a preview-only feature.
+Auto Crop cannot be honoured, because `process_image()` derives the crop from
+the colour frame and the depth would need the identical one.
+
+## Converting with a depth file
+
+`Depth file...` in the main window, next to `Live Preview`, makes `Start`
+convert from a depth file rather than a model.
+
+A conversion cannot pair frames the way the preview does. iw3 calls
+`depth_model.infer(x)` with pixels alone, no frame identity, and runs those
+calls concurrently, so pairing by call order would be a race, and one colour
+frame skipped by `safe_decode` would slide the depth out of register for the
+rest of the film with nothing raised.
+
+The identity is one level up: both frame callbacks receive the pts, and because
+a conversion always sets fps, `FPSFilter` has already overwritten that pts with
+the output frame index, worked out from each frame's own timestamp. Wrapping
+the two binder functions carries it down to the depth model. Order stops
+mattering, `max_workers` stays where you put it, and a dropped frame cannot
+cascade.
+
+That wrapping is the one place this package reaches into iw3's functions rather
+than its classes. It is undone when the conversion ends, including on failure.
+
+Refused before anything is encoded, rather than left to drift: a frame rate
+that differs from the depth file's, a frame count that differs by more than the
+rounding in a container's own estimate, Max FPS below the source rate, and Auto
+Crop. Asking for a frame past the end of the depth file raises instead of
+quietly repeating the last one.
+
+Verified by converting and comparing the output against preview renders of the
+same frames: 0.76 to 0.90 mean absolute difference, against 21.67 for a
+neighbouring frame.
 
 ## Scrubbing
 
@@ -155,6 +185,7 @@ Reduction, which works across frames (the window says so when it is on).
 | `video_source.py` | Seeks a video and decodes one frame the way a conversion would. |
 | `vda.py` | Renders a frame with the temporal VideoDepthAnything models. |
 | `depth_file.py` | Previews with a depth map rendered outside iw3. |
+| `depth_conversion.py` | Carries each frame's index to the depth file during a conversion. |
 | `render_worker.py` | Background render thread with a one-slot request queue. |
 | `model_cache.py` | Keeps the stereo model, and any preview-only depth model, loaded between renders. |
 | `settings_watcher.py` | Cheap change detection over the main window's controls, for `Auto`. |
