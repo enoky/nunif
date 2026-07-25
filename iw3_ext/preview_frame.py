@@ -6,18 +6,38 @@ import iw3.gui as iw3_gui
 from iw3.utils import is_video
 from nunif.gui import is_dark_mode, apply_dark_mode, set_icon_ex
 from nunif.initializer import gc_collect
+from iw3.depth_model_factory import create_depth_model
 from . import frame_source, pipeline
 from .image_canvas import ImageCanvas, pil_to_wx_image
 from .model_cache import ModelCache
 from .pipeline import PreviewError
 from .render_worker import RenderWorker, RenderRequest
+from .settings_watcher import settings_snapshot
 from .video_source import VideoSourceCache
 from .view_modes import VIEW_MODES
 
 
 PREVIEW_SCALES = (100, 50, 25)
 SEEK_TICKS = 1000
+POLL_INTERVAL_MS = 400
+SAME_AS_MAIN = "Same as main"
 EMA_NOTE = "Flicker Reduction works across frames, so a single frame cannot show it."
+
+
+def _ignore_validation_error(*args, **kwargs):
+    pass
+
+
+def image_capable_depth_models(main_frame):
+    """The depth models that can render a still frame (VDA models are video-only)."""
+    names = []
+    for name in main_frame.get_depth_models():
+        try:
+            if create_depth_model(name).is_image_supported():
+                names.append(name)
+        except Exception:  # noqa
+            continue
+    return names
 
 
 def T(s):
@@ -51,7 +71,7 @@ class PreviewFrame(wx.Frame):
             None,
             name="iw3ext-preview",
             title=T("Live Preview"),
-            size=(960, 640),
+            size=(1120, 720),
         )
         self.main_frame = main_frame
         self.on_close_callback = on_close
@@ -64,7 +84,9 @@ class PreviewFrame(wx.Frame):
         self.model_cache = ModelCache()
         self.video_cache = VideoSourceCache()
         self.worker = RenderWorker(self.render, self.on_render_done, self.on_render_error)
-        self.SetMinSize((640, 400))
+        self.applied_snapshot = None
+        self.pending_snapshot = None
+        self.SetMinSize((900, 420))
 
         self.initialize_component()
         if is_dark_mode():
@@ -88,6 +110,14 @@ class PreviewFrame(wx.Frame):
         self.cbo_scale.SetSelection(0)
         self.cbo_scale.SetToolTip(T("Downscale the source frame before processing"))
 
+        self.lbl_depth_model = wx.StaticText(self.pnl_toolbar, label=T("Depth") + ":")
+        self.cbo_depth_model = wx.Choice(
+            self.pnl_toolbar,
+            choices=[T(SAME_AS_MAIN)] + image_capable_depth_models(self.main_frame))
+        self.cbo_depth_model.SetSelection(0)
+        self.cbo_depth_model.SetToolTip(
+            T("Render the preview with a different depth model than the conversion"))
+
         self.btn_zoom_fit = wx.Button(self.pnl_toolbar, label=T("Fit"), style=wx.BU_EXACTFIT)
         self.btn_zoom_100 = wx.Button(self.pnl_toolbar, label="100%", style=wx.BU_EXACTFIT)
         self.btn_save = wx.Button(self.pnl_toolbar, label=T("Save Image") + "...")
@@ -102,6 +132,9 @@ class PreviewFrame(wx.Frame):
         layout.AddSpacer(8)
         layout.Add(self.lbl_scale, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 4)
         layout.Add(self.cbo_scale, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 4)
+        layout.AddSpacer(8)
+        layout.Add(self.lbl_depth_model, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 4)
+        layout.Add(self.cbo_depth_model, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 4)
         layout.AddStretchSpacer()
         layout.Add(self.btn_zoom_fit, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 4)
         layout.Add(self.btn_zoom_100, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 4)
@@ -138,6 +171,7 @@ class PreviewFrame(wx.Frame):
         self.chk_auto.Bind(wx.EVT_CHECKBOX, self.on_changed_auto)
         self.cbo_view.Bind(wx.EVT_CHOICE, self.on_changed_render_option)
         self.cbo_scale.Bind(wx.EVT_CHOICE, self.on_changed_render_option)
+        self.cbo_depth_model.Bind(wx.EVT_CHOICE, self.on_changed_render_option)
         self.btn_zoom_fit.Bind(wx.EVT_BUTTON, self.on_click_btn_zoom_fit)
         self.btn_zoom_100.Bind(wx.EVT_BUTTON, self.on_click_btn_zoom_100)
         self.btn_save.Bind(wx.EVT_BUTTON, self.on_click_btn_save)
@@ -145,6 +179,11 @@ class PreviewFrame(wx.Frame):
         self.sld_seek.Bind(wx.EVT_SLIDER, self.on_changed_seek)
         self.Bind(wx.EVT_ACTIVATE, self.on_activate)
         self.Bind(wx.EVT_CLOSE, self.on_close)
+
+        # Auto: watch the main window for setting changes
+        self.poll_timer = wx.Timer(self)
+        self.Bind(wx.EVT_TIMER, self.on_poll_timer, self.poll_timer)
+        self.poll_timer.Start(POLL_INTERVAL_MS)
 
         # controls that operate on a rendered image stay disabled until there is one
         self.update_image_controls()
@@ -164,6 +203,13 @@ class PreviewFrame(wx.Frame):
     @property
     def auto_refresh(self):
         return self.chk_auto.GetValue()
+
+    @property
+    def depth_model_override(self):
+        selection = self.cbo_depth_model.GetSelection()
+        if selection <= 0:
+            return None
+        return self.cbo_depth_model.GetString(selection)
 
     def is_busy(self):
         return self.worker.is_busy()
@@ -210,21 +256,56 @@ class PreviewFrame(wx.Frame):
 
     # rendering
 
-    def request_render(self):
+    def parse_args(self, silent):
+        """
+        parse_args() reads the widgets, so it has to run on the GUI thread.
+
+        It returns None on an invalid value, after showing a modal dialog. An
+        auto-refresh must not do that: a half-typed number would put a dialog on
+        screen without anyone asking for a render.
+        """
+        if not silent:
+            return self.main_frame.parse_args()
+
+        self.main_frame.show_validation_error_message = _ignore_validation_error
+        try:
+            return self.main_frame.parse_args()
+        finally:
+            del self.main_frame.show_validation_error_message
+
+    def request_render(self, silent=False):
         if self.main_frame.processing:
             self.set_status(T("A conversion is running. Preview is paused until it finishes."))
             return
 
-        # parse_args() reads the widgets, so it has to run on the GUI thread.
-        # It also shows its own dialog and returns None when a value is invalid.
-        args = self.main_frame.parse_args()
+        args = self.parse_args(silent=silent)
         if args is None:
+            # do not retry until something changes
+            self.applied_snapshot = self.pending_snapshot = self.take_snapshot()
             self.set_status(T("Check the settings"))
             return
 
         # keep the preview and the main window from cancelling each other
         args.state["stop_event"] = self.worker.stop_event
 
+        # what the main window would have used, to hand back after the render
+        share = dict(
+            depth_model=args.state["depth_model"],
+            depth_model_type=args.depth_model,
+            depth_model_device_id=args.gpu,
+            depth_model_height=args.resolution,
+            depth_model_limit_resolution=args.limit_resolution,
+        )
+
+        override = self.depth_model_override
+        if override is not None and override != args.depth_model:
+            args.state["depth_model"] = self.model_cache.get_depth_model(
+                override, args.gpu, args.resolution, args.limit_resolution)
+            args.depth_model = override
+        else:
+            override = None
+
+        self.applied_snapshot = self.pending_snapshot = self.take_snapshot()
         self.render_seq += 1
         self.worker.submit(RenderRequest(
             seq=self.render_seq,
@@ -233,6 +314,8 @@ class PreviewFrame(wx.Frame):
             view_mode=self.view_mode,
             scale=self.preview_scale,
             seek=self.seek_position,
+            override=override,
+            share=share,
         ))
         self.set_status(T("Rendering") + "...")
 
@@ -277,14 +360,11 @@ class PreviewFrame(wx.Frame):
         self.canvas.set_image(pil_to_wx_image(result.image), keep_view=True)
         self.update_image_controls()
 
-        # share the loaded depth model with the main window, the same way
-        # MainFrame.on_exit_worker() does after a conversion
-        args = result.args
-        self.main_frame.depth_model = args.state["depth_model"]
-        self.main_frame.depth_model_type = args.depth_model
-        self.main_frame.depth_model_device_id = args.gpu
-        self.main_frame.depth_model_height = args.resolution
-        self.main_frame.depth_model_limit_resolution = args.limit_resolution
+        # hand the depth model to the main window, the same way
+        # MainFrame.on_exit_worker() does after a conversion. With an override
+        # active this is the main window's own model, never the preview's.
+        for name, value in request.share.items():
+            setattr(self.main_frame, name, value)
 
         info = result.info
         if info.is_video:
@@ -293,6 +373,8 @@ class PreviewFrame(wx.Frame):
             self.lbl_seek.SetLabel(self.seek_label())
 
         message = result.note if result.note else path.basename(info.file_path)
+        if request.override is not None:
+            message += f"  [{request.override}]"
         self.set_status(message)
         self.set_info(f"{result.image.width}x{result.image.height}  "
                       f"{result.elapsed * 1000:.0f} ms")
@@ -316,6 +398,27 @@ class PreviewFrame(wx.Frame):
 
     def on_click_btn_refresh(self, event):
         self.request_render()
+
+    def take_snapshot(self):
+        try:
+            return settings_snapshot(self.main_frame)
+        except RuntimeError:
+            # the main window is going away
+            return None
+
+    def on_poll_timer(self, event):
+        if not self.auto_refresh or not self.IsShown() or self.main_frame.processing:
+            return
+
+        snapshot = self.take_snapshot()
+        if snapshot is None:
+            return
+        if snapshot != self.pending_snapshot:
+            # still being edited, render once it settles
+            self.pending_snapshot = snapshot
+            return
+        if snapshot != self.applied_snapshot:
+            self.request_render(silent=True)
 
     def on_changed_auto(self, event):
         if self.auto_refresh:
@@ -397,6 +500,7 @@ class PreviewFrame(wx.Frame):
         if self.on_close_callback is not None:
             self.on_close_callback()
             self.on_close_callback = None
+        self.poll_timer.Stop()
         self.render_seq += 1  # discard anything still in flight
         # short join: an idle worker exits at once, and a busy one is a daemon
         # thread that only holds references, so waiting on it would just freeze

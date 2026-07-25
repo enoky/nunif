@@ -5,15 +5,19 @@ import wx
 
 
 class RenderRequest():
-    __slots__ = ("seq", "args", "input_path", "view_mode", "scale", "seek")
+    __slots__ = ("seq", "args", "input_path", "view_mode", "scale", "seek", "override", "share")
 
-    def __init__(self, seq, args, input_path, view_mode, scale, seek=0.0):
+    def __init__(self, seq, args, input_path, view_mode, scale, seek=0.0,
+                 override=None, share=None):
         self.seq = seq
         self.args = args
         self.input_path = input_path
         self.view_mode = view_mode
         self.scale = scale
         self.seek = seek
+        # preview-only depth model, and the main window's model state to restore
+        self.override = override
+        self.share = share or {}
 
 
 class RenderWorker():

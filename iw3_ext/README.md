@@ -38,11 +38,21 @@ git diff --stat dev -- . ":(exclude)iw3_ext"
 | 1 | Button injection, preview window shell, launcher | done |
 | 2 | Render pipeline, image input, worker thread, canvas, view modes, save | done |
 | 3 | Video input and seek bar | done |
-| 4 | Auto-refresh on main-window setting changes, preview-only depth model | not started |
+| 4 | Auto-refresh on main-window setting changes, preview-only depth model | done |
 | 5 | Persisted window state, translations | not started |
 
-Until phase 4, `Auto` only re-renders when a control in the preview window itself
-changes (view, scale, seek); changes in the main window still need `Refresh`.
+With `Auto` on, the window watches the main window and re-renders about half a
+second after a setting stops changing. It does that by walking the controls
+(`settings_watcher.py`, ~0.3 ms) rather than calling `parse_args()`, which costs
+~240 ms per call and pops a modal dialog on a half-typed value. Auto-refresh
+suppresses that dialog while it reads the settings, so a value being typed can
+never put one on screen.
+
+`Depth` selects a preview-only depth model, for iterating with a small model
+before converting with a large one. It never reaches the main window: an
+override is cached separately and `Start` keeps using the model you chose there.
+The list excludes the VideoDepthAnything models, which cannot render a single
+frame.
 
 The rendered frame is byte-identical to what `Start` writes for that frame: a
 256x256 test image rendered through the preview and through `python -m iw3` with
@@ -65,7 +75,8 @@ Reduction, which works across frames (the window says so when it is on).
 | `frame_source.py` | Turns the input path into the single frame that gets rendered. |
 | `video_source.py` | Seeks a video and decodes one frame the way a conversion would. |
 | `render_worker.py` | Background render thread with a one-slot request queue. |
-| `model_cache.py` | Keeps the stereo model loaded between renders. |
+| `model_cache.py` | Keeps the stereo model, and any preview-only depth model, loaded between renders. |
+| `settings_watcher.py` | Cheap change detection over the main window's controls, for `Auto`. |
 | `image_canvas.py` | Fit/100% zoom, wheel zoom, drag pan. |
 | `compat.py` | Checks the upstream attributes this package depends on, and reports a readable error if iw3 changes. |
 

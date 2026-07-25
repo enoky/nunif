@@ -24,6 +24,8 @@ MAIN_FRAME_API = (
     ("pnl_process", "the bottom panel that the Live Preview button is inserted into"),
     ("btn_start", "used to position the Live Preview button, and to block Start while a preview renders"),
     ("parse_args", "reads the current settings so the preview matches what Start would produce"),
+    ("show_validation_error_message", "silenced during auto-refresh so a half-typed value cannot pop a dialog"),
+    ("get_depth_models", "fills the preview-only depth model list"),
     ("pnl_file", "supplies the current input path"),
     ("processing", "tells the preview whether a conversion job is already running"),
     ("depth_model", "depth model cache shared between the main window and the preview"),
