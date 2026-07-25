@@ -58,17 +58,25 @@ def scale_source(x, scale):
                      interpolation=InterpolationMode.BICUBIC, antialias=True).clamp(0, 1)
 
 
-def load_source_frame(file_path, args, device, scale=100, seek=0.0, video_cache=None):
-    """Returns (CHW float tensor on device, SourceInfo)."""
+def load_source_frame(file_path, args, device, scale=100, seek=0.0, video_cache=None,
+                      warmup=0, warmup_short_side=None):
+    """
+    Returns (CHW float tensor on device, warmup frames, SourceInfo).
+
+    warmup frames are the ones preceding it, oldest first, for the temporal
+    depth models. Image input has none: those models fall back to bootstrapping
+    from the single frame.
+    """
     if is_video(file_path):
         if video_cache is None:
             raise PreviewError("No video cache available")
         source = video_cache.get(file_path, args, device)
-        x, position = source.grab(seek)
+        x, warmup_frames, position = source.grab(
+            seek, warmup=warmup, warmup_short_side=warmup_short_side)
         info = SourceInfo(file_path, is_video=True, position=position,
                           start_time=source.start_time, end_time=source.end_time,
                           duration=source.duration)
-        return scale_source(x, scale), info
+        return scale_source(x, scale), warmup_frames, info
 
     im, _ = load_image_simple(file_path, color="rgb",
                               exif_transpose=not args.disable_exif_transpose)
@@ -76,4 +84,4 @@ def load_source_frame(file_path, args, device, scale=100, seek=0.0, video_cache=
         raise PreviewError(f"Could not load {file_path}")
 
     x = TF.to_tensor(im).to(device)
-    return scale_source(x, scale), SourceInfo(file_path)
+    return scale_source(x, scale), [], SourceInfo(file_path)

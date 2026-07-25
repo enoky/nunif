@@ -40,6 +40,7 @@ git diff --stat dev -- . ":(exclude)iw3_ext"
 | 3 | Video input and seek bar | done |
 | 4 | Auto-refresh on main-window setting changes, preview-only depth model | done |
 | 5 | Persisted window state, translations | done |
+| 6 | Previewing with the VideoDepthAnything models | done |
 
 With `Auto` on, the window watches the main window and re-renders about half a
 second after a setting stops changing. It does that by walking the controls
@@ -51,8 +52,23 @@ never put one on screen.
 `Depth` selects a preview-only depth model, for iterating with a small model
 before converting with a large one. It never reaches the main window: an
 override is cached separately and `Start` keeps using the model you chose there.
-The list excludes the VideoDepthAnything models, which cannot render a single
-frame.
+
+Every model is offered, including the VideoDepthAnything ones that report
+`is_image_supported() == False`. How they render one frame, and why the window
+the online variant needs is free, is at the top of `vda.py`. Measured on a
+320x240 clip, warm (excluding the first render, which loads the model):
+
+| | |
+| --- | --- |
+| `Distill_Any_S` (image model) | 35 ms |
+| `VDA_Stream_S` | 29 ms |
+| `VDA_S`, 31 warmup frames | 185 ms |
+| `VDA_S`, no warmup frames | 172 ms |
+
+The 31 frames of real temporal context cost 13 ms, all of it decoding: the
+model runs the same single window pass either way. VDA output is an
+approximation rather than the byte-exact frame the image models give, and the
+window says so in the status bar.
 
 Window size, position and the toolbar settings are kept in
 `<config dir>/iw3-gui-preview.json`, separate from the main window's preset file
@@ -85,6 +101,7 @@ Reduction, which works across frames (the window says so when it is on).
 | `pipeline.py` | Mirror of the model setup in `iw3_main()`, plus the view-mode handling. |
 | `frame_source.py` | Turns the input path into the single frame that gets rendered. |
 | `video_source.py` | Seeks a video and decodes one frame the way a conversion would. |
+| `vda.py` | Renders a frame with the temporal VideoDepthAnything models. |
 | `render_worker.py` | Background render thread with a one-slot request queue. |
 | `model_cache.py` | Keeps the stereo model, and any preview-only depth model, loaded between renders. |
 | `settings_watcher.py` | Cheap change detection over the main window's controls, for `Auto`. |

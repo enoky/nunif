@@ -12,6 +12,7 @@ from iw3.utils import (
     resolve_mapper_name,
     to_pil_image,
 )
+from . import vda
 from .view_modes import VIEW_LEFT, VIEW_RIGHT, VIEW_DEPTH
 
 
@@ -54,7 +55,7 @@ def prepare_args(args, view_mode):
 
 def prepare_models(args, depth_model, model_cache, status_fn=None):
     """Mirror of iw3_main() up to the point where it starts processing files."""
-    if not depth_model.is_image_supported():
+    if not (depth_model.is_image_supported() or vda.is_vda(depth_model)):
         raise PreviewError(
             f"{args.depth_model} is a video-only depth model, "
             f"so it cannot render a single frame. Choose an image-capable depth model."
@@ -90,17 +91,20 @@ def prepare_models(args, depth_model, model_cache, status_fn=None):
     # process_image() asserts a buffer size of 1. process_video()/process_images()
     # set up their own EMA state on every run, so this does not affect them.
     depth_model.disable_ema()
+    # temporal models carry state between frames; drop what the last render left
+    # so the same seek position always renders the same way
+    depth_model.reset_state()
 
     return side_model
 
 
-def render(args, x, depth_model, model_cache, view_mode, status_fn=None):
+def render(args, x, depth_model, model_cache, view_mode, warmup_frames=None, status_fn=None):
     """Runs one frame through the pipeline and returns a PIL image."""
     side_model = prepare_models(args, depth_model, model_cache, status_fn=status_fn)
     if status_fn is not None:
         status_fn("Rendering...")
 
-    output = process_image(x, args, depth_model, side_model)
+    output = process_image(x, args, vda.wrap(depth_model, warmup_frames), side_model)
 
     if view_mode in (VIEW_LEFT, VIEW_RIGHT):
         half = output.shape[-1] // 2

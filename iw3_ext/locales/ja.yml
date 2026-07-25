@@ -27,4 +27,6 @@
 "A conversion is running. Preview is paused until it finishes.": "変換の実行中です。完了までプレビューは停止します"
 "A preview render is still running. Wait for it to finish.": "プレビューの描画中です。完了までお待ちください"
 "Flicker Reduction works across frames, so a single frame cannot show it.": "ちらつき軽減は複数フレームにまたがる処理のため、1フレームでは確認できません"
+"VideoDepthAnything depth is approximated from a short window of frames, so it will not match a conversion exactly.": "VideoDepthAnythingの深度は短いフレーム区間から近似しているため、変換結果とは完全には一致しません"
+"VideoDepthAnythingStreaming depth is bootstrapped from this frame alone, so it will not match a conversion exactly.": "VideoDepthAnythingStreamingの深度はこの1フレームのみから生成しているため、変換結果とは完全には一致しません"
 "Export mode has no image output. Showing the depth map.": "エクスポートには画像出力がないため、深度マップを表示します"

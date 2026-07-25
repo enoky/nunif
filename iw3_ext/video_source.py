@@ -19,7 +19,9 @@ Three differences from a full conversion are unavoidable in a still preview:
   derives one crop from an analysis pass over the whole file.
 """
 import threading
+from collections import deque
 import av
+from torchvision.transforms import functional as TF, InterpolationMode
 from nunif.utils.video import VideoMetadata, VideoOutputConfig, to_tensor
 from nunif.utils.video.color_transform import setup_color_transform
 from nunif.utils.video.hwaccel import create_hwaccel, get_compatible_hwaccel
@@ -108,6 +110,10 @@ class VideoSource():
         _, duration = self.sw_format.guess_frames(return_duration=True)
         self.duration = duration if duration and duration > 0 else 0.0
         self.start_time, self.end_time = resolve_time_range(args, self.duration)
+        try:
+            self.fps = float(self.sw_format.get_fps())
+        except Exception:  # noqa
+            self.fps = 0.0
 
     def _open(self, file_path, hwaccel, device):
         return av.open(
@@ -115,26 +121,55 @@ class VideoSource():
             hwaccel=create_hwaccel(device=hwaccel, device_id=device.index,
                                    disable_software_fallback=self.strict))
 
-    def grab(self, position):
-        """position is 0.0-1.0 over the Start/End range. Returns (tensor, seconds)."""
+    def grab(self, position, warmup=0, warmup_short_side=None):
+        """
+        position is 0.0-1.0 over the Start/End range.
+
+        Returns (tensor, warmup_frames, seconds). warmup_frames holds up to
+        `warmup` frames preceding the returned one, oldest first, for the
+        temporal depth models. They are shrunk to warmup_short_side because
+        they only condition the model's state.
+        """
         if self.duration <= 0:
             # no usable duration, all that can be done is take the first frame
-            return self._decode_at(0.0), 0.0
+            target_sec = 0.0
+        else:
+            target_sec = self.start_time + (self.end_time - self.start_time) * position
+            target_sec = min(max(target_sec, 0.0), max(self.duration - 0.001, 0.0))
 
-        target_sec = self.start_time + (self.end_time - self.start_time) * position
-        target_sec = min(max(target_sec, 0.0), max(self.duration - 0.001, 0.0))
-        return self._decode_at(target_sec), target_sec
+        x, warmup_frames = self._decode_at(target_sec, warmup, warmup_short_side)
+        return x, warmup_frames, target_sec
 
-    def _decode_at(self, target_sec):
+    def _seek_seconds(self, target_sec, warmup):
+        """Start far enough back that `warmup` frames precede the target."""
+        if warmup <= 0 or not self.fps:
+            return target_sec
+        # a little extra: seeking lands on the keyframe at or before this
+        return max(0.0, target_sec - (warmup + 2) / self.fps)
+
+    def _shrink(self, x, short_side):
+        if not short_side:
+            return x
+        height, width = x.shape[-2:]
+        current = min(height, width)
+        if current <= short_side:
+            return x
+        scale = short_side / current
+        return TF.resize(x, (max(1, int(height * scale)), max(1, int(width * scale))),
+                         interpolation=InterpolationMode.BILINEAR, antialias=True)
+
+    def _decode_at(self, target_sec, warmup=0, warmup_short_side=None):
         time_base = self.stream.time_base
         target_pts = int(target_sec / time_base) if time_base else 0
+        seek_pts = int(self._seek_seconds(target_sec, warmup) / time_base) if time_base else 0
 
         try:
-            self.container.seek(target_pts, stream=self.stream, backward=True, any_frame=False)
+            self.container.seek(seek_pts, stream=self.stream, backward=True, any_frame=False)
         except Exception:  # noqa
             # unseekable input: fall back to decoding from wherever it is
             pass
 
+        preceding = deque(maxlen=warmup) if warmup > 0 else None
         last_frame = None
         scanned = 0
         for packet in self.container.demux([self.stream]):
@@ -147,13 +182,16 @@ class VideoSource():
                 for out_frame in self.preprocessor.update(frame):
                     last_frame = out_frame
                     if reached:
-                        return to_tensor(last_frame, device=self.device)
+                        return to_tensor(last_frame, device=self.device), list(preceding or [])
+                    if preceding is not None:
+                        preceding.append(
+                            self._shrink(to_tensor(out_frame, device=self.device), warmup_short_side))
             if scanned > MAX_SCAN_FRAMES:
                 break
 
         if last_frame is None:
             raise PreviewError(f"Could not decode a frame at {target_sec:.1f}s")
-        return to_tensor(last_frame, device=self.device)
+        return to_tensor(last_frame, device=self.device), list(preceding or [])
 
     def close(self):
         container = getattr(self, "container", None)

@@ -6,8 +6,7 @@ import iw3.gui as iw3_gui
 from iw3.utils import is_video
 from nunif.gui import is_dark_mode, apply_dark_mode, set_icon_ex
 from nunif.initializer import gc_collect
-from iw3.depth_model_factory import create_depth_model
-from . import frame_source, pipeline
+from . import frame_source, pipeline, vda
 from .image_canvas import ImageCanvas, pil_to_wx_image
 from .model_cache import ModelCache
 from .pipeline import PreviewError
@@ -30,16 +29,14 @@ def _ignore_validation_error(*args, **kwargs):
     pass
 
 
-def image_capable_depth_models(main_frame):
-    """The depth models that can render a still frame (VDA models are video-only)."""
-    names = []
-    for name in main_frame.get_depth_models():
-        try:
-            if create_depth_model(name).is_image_supported():
-                names.append(name)
-        except Exception:  # noqa
-            continue
-    return names
+def preview_depth_models(main_frame):
+    """
+    Every model the main window offers.
+
+    The VideoDepthAnything models report is_image_supported() == False, but
+    iw3_ext.vda renders a frame with them anyway.
+    """
+    return list(main_frame.get_depth_models())
 
 
 def format_time(seconds):
@@ -112,7 +109,7 @@ class PreviewFrame(wx.Frame):
         self.lbl_depth_model = wx.StaticText(self.pnl_toolbar, label=T("Depth") + ":")
         self.cbo_depth_model = wx.Choice(
             self.pnl_toolbar,
-            choices=[T(SAME_AS_MAIN)] + image_capable_depth_models(self.main_frame))
+            choices=[T(SAME_AS_MAIN)] + preview_depth_models(self.main_frame))
         self.cbo_depth_model.SetSelection(0)
         self.cbo_depth_model.SetToolTip(
             T("Render the preview with a different depth model than the conversion"))
@@ -374,17 +371,24 @@ class PreviewFrame(wx.Frame):
             wx.CallAfter(self.on_render_status, request, message)
 
         args = request.args
+        depth_model = args.state["depth_model"]
         source_path = frame_source.resolve_source_path(request.input_path)
         args, note = pipeline.prepare_args(args, request.view_mode)
-        x, info = frame_source.load_source_frame(
+        x, warmup_frames, info = frame_source.load_source_frame(
             source_path, args, args.state["device"],
-            scale=request.scale, seek=request.seek, video_cache=self.video_cache)
-        if info.is_video and getattr(args, "ema_normalize", False) and not note:
-            note = EMA_NOTE
+            scale=request.scale, seek=request.seek, video_cache=self.video_cache,
+            warmup=vda.warmup_frame_count(depth_model),
+            warmup_short_side=vda.warmup_frame_size(args))
+        if not note:
+            if vda.is_vda(depth_model):
+                note = vda.preview_note(depth_model)
+            elif info.is_video and getattr(args, "ema_normalize", False):
+                note = EMA_NOTE
 
         start_time = time()
-        image = pipeline.render(args, x, args.state["depth_model"], self.model_cache,
-                                request.view_mode, status_fn=status_fn)
+        image = pipeline.render(args, x, depth_model, self.model_cache,
+                                request.view_mode, warmup_frames=warmup_frames,
+                                status_fn=status_fn)
         return RenderResult(image=image, elapsed=time() - start_time, note=note,
                             info=info, args=args)
 
