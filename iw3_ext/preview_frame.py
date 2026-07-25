@@ -7,7 +7,7 @@ import iw3.gui as iw3_gui
 from iw3.utils import is_video
 from nunif.gui import is_dark_mode, apply_dark_mode, set_icon_ex
 from nunif.initializer import gc_collect
-from . import frame_source, pipeline, vda
+from . import depth_file, frame_source, pipeline, vda
 from .image_canvas import ImageCanvas, pil_to_wx_image
 from .model_cache import ModelCache
 from .pipeline import PreviewError
@@ -28,7 +28,14 @@ MAX_SEEK_TICKS = 500000
 SEEK_DEBOUNCE_MS = 150
 POLL_INTERVAL_MS = 400
 SAME_AS_MAIN = "Same as main"
+DEPTH_FILE_LABEL = "Depth file..."
 EMA_NOTE = "Flicker Reduction works across frames, so a single frame cannot show it."
+ASPECT_NOTE = ("The depth file has a different shape than the video, "
+               "so it is being stretched to fit.")
+DEPTH_WILDCARD = ("Depth map|*.mp4;*.mkv;*.mov;*.avi;*.png;*.tif;*.tiff|"
+                  "Video (*.mp4;*.mkv;*.mov;*.avi)|*.mp4;*.mkv;*.mov;*.avi|"
+                  "Image (*.png;*.tif;*.tiff)|*.png;*.tif;*.tiff|"
+                  "All files|*.*")
 
 
 def _ignore_validation_error(*args, **kwargs):
@@ -82,8 +89,11 @@ class PreviewFrame(wx.Frame):
         self.source_end = None
         self.render_seq = 0
         self.pil_image = None
+        self.depth_file_path = None
+        self.depth_selection = 0
         self.model_cache = ModelCache()
         self.video_cache = VideoSourceCache()
+        self.depth_video_cache = VideoSourceCache()
         self.worker = RenderWorker(self.render, self.on_render_done, self.on_render_error)
         self.applied_snapshot = None
         self.pending_snapshot = None
@@ -115,9 +125,10 @@ class PreviewFrame(wx.Frame):
         self.cbo_scale.SetToolTip(T("Downscale the source frame before processing"))
 
         self.lbl_depth_model = wx.StaticText(self.pnl_toolbar, label=T("Depth") + ":")
+        self.depth_model_names = preview_depth_models(self.main_frame)
         self.cbo_depth_model = wx.Choice(
             self.pnl_toolbar,
-            choices=[T(SAME_AS_MAIN)] + preview_depth_models(self.main_frame))
+            choices=[T(SAME_AS_MAIN)] + self.depth_model_names + [T(DEPTH_FILE_LABEL)])
         self.cbo_depth_model.SetSelection(0)
         self.cbo_depth_model.SetToolTip(
             T("Render the preview with a different depth model than the conversion"))
@@ -175,7 +186,7 @@ class PreviewFrame(wx.Frame):
         self.chk_auto.Bind(wx.EVT_CHECKBOX, self.on_changed_auto)
         self.cbo_view.Bind(wx.EVT_CHOICE, self.on_changed_render_option)
         self.cbo_scale.Bind(wx.EVT_CHOICE, self.on_changed_render_option)
-        self.cbo_depth_model.Bind(wx.EVT_CHOICE, self.on_changed_render_option)
+        self.cbo_depth_model.Bind(wx.EVT_CHOICE, self.on_changed_depth_model)
         self.btn_zoom_fit.Bind(wx.EVT_BUTTON, self.on_click_btn_zoom_fit)
         self.btn_zoom_100.Bind(wx.EVT_BUTTON, self.on_click_btn_zoom_100)
         self.btn_save.Bind(wx.EVT_BUTTON, self.on_click_btn_save)
@@ -213,12 +224,51 @@ class PreviewFrame(wx.Frame):
     def auto_refresh(self):
         return self.chk_auto.GetValue()
 
+    # The depth choice holds, in order: "same as main", the model names, the
+    # chosen depth file if there is one, and the entry that opens the file
+    # dialog.
+
+    @property
+    def depth_file_index(self):
+        return len(self.depth_model_names) + 1 if self.depth_file_path else -1
+
+    @property
+    def browse_index(self):
+        return self.cbo_depth_model.GetCount() - 1
+
     @property
     def depth_model_override(self):
         selection = self.cbo_depth_model.GetSelection()
-        if selection <= 0:
+        if selection <= 0 or selection > len(self.depth_model_names):
             return None
         return self.cbo_depth_model.GetString(selection)
+
+    @property
+    def depth_file(self):
+        if self.depth_file_path and self.cbo_depth_model.GetSelection() == self.depth_file_index:
+            return self.depth_file_path
+        return None
+
+    def set_depth_file(self, file_path, select=True):
+        """Adds the file to the choice, replacing one already there."""
+        if self.depth_file_path:
+            self.cbo_depth_model.Delete(self.depth_file_index)
+        self.depth_file_path = file_path
+        if not file_path:
+            return
+        index = len(self.depth_model_names) + 1
+        self.cbo_depth_model.Insert(path.basename(file_path), index)
+        self.cbo_depth_model.SetToolTip(file_path)
+        if select:
+            self.cbo_depth_model.SetSelection(index)
+
+    def choose_depth_file(self):
+        with wx.FileDialog(self, T("Depth file"), wildcard=DEPTH_WILDCARD,
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
+            if dlg.ShowModal() == wx.ID_CANCEL:
+                return False
+            self.set_depth_file(dlg.GetPath())
+            return True
 
     def is_busy(self):
         return self.worker.is_busy()
@@ -247,12 +297,19 @@ class PreviewFrame(wx.Frame):
         if scale in PREVIEW_SCALES:
             self.cbo_scale.SetSelection(PREVIEW_SCALES.index(scale))
 
+        saved_depth_file = state.get("depth_file")
+        if saved_depth_file and path.exists(saved_depth_file):
+            self.set_depth_file(saved_depth_file, select=False)
+
         depth_model = state.get("depth_model")
         if depth_model:
             # the model may not be offered any more, in which case keep the default
             index = self.cbo_depth_model.FindString(depth_model)
             if index != wx.NOT_FOUND:
                 self.cbo_depth_model.SetSelection(index)
+        elif state.get("depth_from_file") and self.depth_file_path:
+            self.cbo_depth_model.SetSelection(self.depth_file_index)
+        self.depth_selection = self.cbo_depth_model.GetSelection()
 
         # Auto being on is not a reason to render as soon as the window opens:
         # seed the snapshot so it only fires once something actually changes
@@ -265,6 +322,8 @@ class PreviewFrame(wx.Frame):
             view=self.view_mode,
             scale=self.preview_scale,
             depth_model=self.depth_model_override,
+            depth_file=self.depth_file_path,
+            depth_from_file=self.depth_file is not None,
         )
         if not (self.IsMaximized() or self.IsIconized()):
             size = self.GetSize()
@@ -403,7 +462,10 @@ class PreviewFrame(wx.Frame):
         )
 
         override = self.depth_model_override
-        if override is not None and override != args.depth_model:
+        if self.depth_file is not None:
+            # the depth comes from a file; the model is loaded on the worker
+            override = None
+        elif override is not None and override != args.depth_model:
             args.state["depth_model"] = self.model_cache.get_depth_model(
                 override, args.gpu, args.resolution, args.limit_resolution)
             args.depth_model = override
@@ -421,6 +483,7 @@ class PreviewFrame(wx.Frame):
             seek=self.seek_position,
             override=override,
             share=share,
+            depth_file=self.depth_file,
         ))
         self.set_status(T("Rendering") + "...")
 
@@ -433,13 +496,23 @@ class PreviewFrame(wx.Frame):
         depth_model = args.state["depth_model"]
         source_path = frame_source.resolve_source_path(request.input_path)
         args, note = pipeline.prepare_args(args, request.view_mode)
+
+        # a depth file replaces the model, so no warmup window is needed
+        warmup = 0 if request.depth_file else vda.warmup_frame_count(depth_model)
         x, warmup_frames, info = frame_source.load_source_frame(
             source_path, args, args.state["device"],
             scale=request.scale, seek=request.seek, video_cache=self.video_cache,
-            warmup=vda.warmup_frame_count(depth_model),
-            warmup_short_side=vda.warmup_frame_size(args))
+            warmup=warmup, warmup_short_side=vda.warmup_frame_size(args))
+
+        if request.depth_file:
+            depth_model = self.load_depth_file(request, args, info, status_fn)
+            args.state["depth_model"] = depth_model
+            args.depth_model = depth_file.MODEL_TYPE
+
         if not note:
-            if vda.is_vda(depth_model):
+            if request.depth_file:
+                note = ""
+            elif vda.is_vda(depth_model):
                 note = vda.preview_note(depth_model)
             elif info.is_video and getattr(args, "ema_normalize", False):
                 note = EMA_NOTE
@@ -450,6 +523,25 @@ class PreviewFrame(wx.Frame):
                                 status_fn=status_fn)
         return RenderResult(image=image, elapsed=time() - start_time, note=note,
                             info=info, args=args)
+
+    def load_depth_file(self, request, args, info, status_fn=None):
+        """Runs on the worker thread: reads the frame that matches the colour one."""
+        if info.is_video:
+            if not info.fps:
+                raise PreviewError("The video has no frame rate, so a depth file cannot be lined up")
+            index = int(round(info.position * info.fps))
+        else:
+            index = 0
+
+        if status_fn is not None:
+            status_fn(f"Reading depth frame {index}...")
+
+        depth, _ = depth_file.load_depth_frame(
+            request.depth_file, index, args, args.state["device"], self.depth_video_cache)
+
+        depth_model = self.model_cache.get_file_depth_model()
+        depth_model.set_frame(depth, args)
+        return depth_model
 
     def is_stale(self, request):
         """True when the window is gone or a newer request has been submitted."""
@@ -488,6 +580,11 @@ class PreviewFrame(wx.Frame):
         message = T(result.note) if result.note else path.basename(info.file_path)
         if request.override is not None:
             message += f"  [{request.override}]"
+        elif request.depth_file is not None:
+            message += f"  [{T('Depth')}: {path.basename(request.depth_file)}]"
+            if self.model_cache.file_depth_model is not None and \
+                    self.model_cache.file_depth_model.aspect_mismatch:
+                message = T(ASPECT_NOTE) + "  " + message
         self.set_status(message)
         self.set_info(f"{result.image.width}x{result.image.height}  "
                       f"{result.elapsed * 1000:.0f} ms")
@@ -541,19 +638,41 @@ class PreviewFrame(wx.Frame):
         if self.auto_refresh:
             self.request_render()
 
+    def on_changed_depth_model(self, event):
+        if self.cbo_depth_model.GetSelection() == self.browse_index:
+            if not self.choose_depth_file():
+                # cancelled: go back to whatever was selected before
+                self.cbo_depth_model.SetSelection(self.depth_selection)
+                return
+        self.depth_selection = self.cbo_depth_model.GetSelection()
+        self.request_render(silent=True)
+
+    def sync_seek_position(self):
+        """
+        Reads the slider.
+
+        Every path that renders re-reads it rather than trusting a value stored
+        by an earlier event: a click on the slider track, or a move made in
+        code, does not necessarily raise EVT_SLIDER first, and rendering the
+        frame before the one being pointed at is worse than reading twice.
+        """
+        self.seek_position = self.sld_seek.GetValue() / self.seek_ticks()
+        self.lbl_seek.SetLabel(self.seek_label())
+
     def on_changed_seek(self, event):
         # the label follows the slider immediately; the render waits for the
         # drag to settle, since each one costs a decode and an inference
-        self.seek_position = self.sld_seek.GetValue() / self.seek_ticks()
-        self.lbl_seek.SetLabel(self.seek_label())
+        self.sync_seek_position()
         self.seek_timer.StartOnce(SEEK_DEBOUNCE_MS)
 
     def on_seek_released(self, event):
         self.seek_timer.Stop()
+        self.sync_seek_position()
         self.request_render(silent=True)
         event.Skip()
 
     def on_seek_timer(self, event):
+        self.sync_seek_position()
         self.request_render(silent=True)
 
     def on_click_btn_zoom_fit(self, event):
@@ -597,10 +716,11 @@ class PreviewFrame(wx.Frame):
         # the cached args hold the model instances in their state dict
         self.invalidate_args()
         self.model_cache.clear()
-        if self.worker.is_busy():
-            self.video_cache.release()
-        else:
-            self.video_cache.close()
+        for cache in (self.video_cache, self.depth_video_cache):
+            if self.worker.is_busy():
+                cache.release()
+            else:
+                cache.close()
         if include_depth_model:
             # same fields MainFrame.parse_args() resets when the model changes
             self.main_frame.depth_model = None

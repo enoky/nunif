@@ -42,6 +42,7 @@ git diff --stat dev -- . ":(exclude)iw3_ext"
 | 5 | Persisted window state, translations | done |
 | 6 | Previewing with the VideoDepthAnything models | done |
 | 7 | Timeline scrubbing | done |
+| 8 | Importing pre-rendered depth maps | done |
 
 With `Auto` on, the window watches the main window and re-renders about half a
 second after a setting stops changing. It does that by walking the controls
@@ -88,6 +89,28 @@ the same settings compared at a max absolute difference of 0. Video frames are
 decoded through the same path a conversion uses, verified against `hook_frame()`
 at several seek positions, also at a max absolute difference of 0.
 
+## Pre-rendered depth
+
+The last entry in `Depth` opens a depth map rendered elsewhere -- DepthCrafter,
+DVD, GemDepth -- and previews with it instead of a model. Depth videos (10 bit
+HEVC included), a single 16 bit PNG, or a directory of them.
+
+The frames are read rather than inferred; everything after that is the normal
+pipeline, so edge dilation, per-frame normalisation, the mapper behind
+Foreground Scale, convergence and the stereo synthesis behave as they do with a
+model. This follows what `process_config_video()` does with iw3's own exported
+depth: the file carries no mapper of its own, so `args.mapper` applies.
+
+Depth and colour are matched **by frame index**, not timestamp, so a file
+written as 29.97 and one written as 30 cannot drift apart over a long clip.
+Different resolutions are fine. A different aspect ratio is reported in the
+status bar rather than silently stretched.
+
+Two things it does not do: Auto Crop cannot be honoured, because
+`process_image()` derives the crop from the colour frame and the depth would
+need the identical one; and `Start` still converts with the depth model, since
+this is a preview-only feature.
+
 ## Scrubbing
 
 One slider tick is one frame once the frame rate is known, so the arrow keys
@@ -122,6 +145,7 @@ Reduction, which works across frames (the window says so when it is on).
 | `frame_source.py` | Turns the input path into the single frame that gets rendered. |
 | `video_source.py` | Seeks a video and decodes one frame the way a conversion would. |
 | `vda.py` | Renders a frame with the temporal VideoDepthAnything models. |
+| `depth_file.py` | Previews with a depth map rendered outside iw3. |
 | `render_worker.py` | Background render thread with a one-slot request queue. |
 | `model_cache.py` | Keeps the stereo model, and any preview-only depth model, loaded between renders. |
 | `settings_watcher.py` | Cheap change detection over the main window's controls, for `Auto`. |

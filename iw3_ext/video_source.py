@@ -21,6 +21,7 @@ Three differences from a full conversion are unavoidable in a still preview:
 import sys
 import threading
 from collections import deque
+from os import path
 import av
 from torchvision.transforms import functional as TF, InterpolationMode
 from nunif.utils.video import VideoMetadata, VideoOutputConfig, to_tensor
@@ -148,6 +149,25 @@ class VideoSource():
         else:
             target_sec = self.start_time + (self.end_time - self.start_time) * position
             target_sec = min(max(target_sec, 0.0), max(self.duration - 0.001, 0.0))
+
+        x, warmup_frames = self._decode_at(target_sec, warmup, warmup_short_side)
+        return x, warmup_frames, target_sec
+
+    def grab_index(self, index, warmup=0, warmup_short_side=None):
+        """
+        The frame at a position counted in frames rather than seconds.
+
+        Used to line a depth file up with the colour source: both hold the same
+        number of frames, so frame N matches frame N whatever rounding their
+        frame rates were written with. The quarter frame back keeps the search,
+        which takes the first frame at or after the target, off the boundary.
+        """
+        if not self.fps:
+            raise PreviewError(f"No frame rate for {path.basename(self.file_path)}")
+
+        target_sec = max(0.0, (index - 0.25) / self.fps)
+        if self.duration > 0:
+            target_sec = min(target_sec, max(self.duration - 0.001, 0.0))
 
         x, warmup_frames = self._decode_at(target_sec, warmup, warmup_short_side)
         return x, warmup_frames, target_sec

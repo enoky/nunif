@@ -2,6 +2,7 @@ import threading
 from iw3.depth_model_factory import create_depth_model
 from iw3.stereo_model_factory import create_stereo_model, get_mlbw_divergence_level
 from nunif.initializer import gc_collect
+from .depth_file import FileDepthModel
 
 
 # create_stereo_model() matches this name before the mlbw_ prefix test, and does
@@ -53,6 +54,7 @@ class ModelCache:
         self.has_entry = False
         self.depth_model = None
         self.depth_key = None
+        self.file_depth_model = None
 
     def get_side_model(self, args, status_fn=None):
         key = side_model_key(args)
@@ -97,6 +99,13 @@ class ModelCache:
             self.depth_key = key
         return depth_model
 
+    def get_file_depth_model(self):
+        """Kept between renders so it stays loaded, like any other depth model."""
+        with self.lock:
+            if self.file_depth_model is None:
+                self.file_depth_model = FileDepthModel()
+            return self.file_depth_model
+
     def clear(self):
         with self.lock:
             self.side_model = None
@@ -104,4 +113,5 @@ class ModelCache:
             self.has_entry = False
             self.depth_model = None
             self.depth_key = None
+            self.file_depth_model = None
         gc_collect()
