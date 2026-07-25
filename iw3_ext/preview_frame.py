@@ -29,6 +29,11 @@ SEEK_DEBOUNCE_MS = 150
 POLL_INTERVAL_MS = 400
 SAME_AS_MAIN = "Same as main"
 DEPTH_FILE_LABEL = "Depth file..."
+# entry kinds in the Depth choice
+DEPTH_BROWSE = "browse"
+DEPTH_FILE = "file"
+DEPTH_MAIN = "main"
+DEPTH_MODEL = "model"
 EMA_NOTE = "Flicker Reduction works across frames, so a single frame cannot show it."
 ASPECT_NOTE = ("The depth file has a different shape than the video, "
                "so it is being stretched to fit.")
@@ -90,6 +95,7 @@ class PreviewFrame(wx.Frame):
         self.render_seq = 0
         self.pil_image = None
         self.depth_file_path = None
+        self.depth_entries = []
         self.depth_selection = 0
         self.model_cache = ModelCache()
         self.video_cache = VideoSourceCache()
@@ -126,10 +132,8 @@ class PreviewFrame(wx.Frame):
 
         self.lbl_depth_model = wx.StaticText(self.pnl_toolbar, label=T("Depth") + ":")
         self.depth_model_names = preview_depth_models(self.main_frame)
-        self.cbo_depth_model = wx.Choice(
-            self.pnl_toolbar,
-            choices=[T(SAME_AS_MAIN)] + self.depth_model_names + [T(DEPTH_FILE_LABEL)])
-        self.cbo_depth_model.SetSelection(0)
+        self.cbo_depth_model = wx.Choice(self.pnl_toolbar)
+        self.rebuild_depth_choice()
         self.cbo_depth_model.SetToolTip(
             T("Render the preview with a different depth model than the conversion"))
 
@@ -224,43 +228,75 @@ class PreviewFrame(wx.Frame):
     def auto_refresh(self):
         return self.chk_auto.GetValue()
 
-    # The depth choice holds, in order: "same as main", the model names, the
-    # chosen depth file if there is one, and the entry that opens the file
-    # dialog.
+    # The depth choice is built from typed entries rather than fixed positions,
+    # so the order can change without index arithmetic spreading through the
+    # window. It reads: the file dialog, the chosen file if there is one, "same
+    # as main", then the models.
 
-    @property
-    def depth_file_index(self):
-        return len(self.depth_model_names) + 1 if self.depth_file_path else -1
+    def build_depth_entries(self):
+        entries = [(DEPTH_BROWSE, None)]
+        if self.depth_file_path:
+            entries.append((DEPTH_FILE, self.depth_file_path))
+        entries.append((DEPTH_MAIN, None))
+        entries += [(DEPTH_MODEL, name) for name in self.depth_model_names]
+        return entries
 
-    @property
-    def browse_index(self):
-        return self.cbo_depth_model.GetCount() - 1
+    def depth_entry_label(self, kind, value):
+        if kind == DEPTH_BROWSE:
+            return T(DEPTH_FILE_LABEL)
+        if kind == DEPTH_FILE:
+            return path.basename(value)
+        if kind == DEPTH_MAIN:
+            return T(SAME_AS_MAIN)
+        return value
+
+    def rebuild_depth_choice(self, kind=DEPTH_MAIN, value=None):
+        """Refills the choice and selects the entry of the given kind."""
+        self.depth_entries = self.build_depth_entries()
+        self.cbo_depth_model.Set([self.depth_entry_label(*entry) for entry in self.depth_entries])
+        self.cbo_depth_model.SetToolTip(self.depth_file_path or None)
+        self.select_depth_entry(kind, value)
+
+    def select_depth_entry(self, kind, value=None):
+        for index, entry in enumerate(self.depth_entries):
+            if entry[0] == kind and (value is None or entry[1] == value):
+                self.cbo_depth_model.SetSelection(index)
+                break
+        else:
+            self.select_depth_entry(DEPTH_MAIN)
+            return
+        self.depth_selection = self.cbo_depth_model.GetSelection()
+
+    def selected_depth_entry(self):
+        selection = self.cbo_depth_model.GetSelection()
+        if 0 <= selection < len(self.depth_entries):
+            return self.depth_entries[selection]
+        return (DEPTH_MAIN, None)
+
+    def select_depth_main(self):
+        self.select_depth_entry(DEPTH_MAIN)
+
+    def select_depth_model(self, name):
+        self.select_depth_entry(DEPTH_MODEL, name)
 
     @property
     def depth_model_override(self):
-        selection = self.cbo_depth_model.GetSelection()
-        if selection <= 0 or selection > len(self.depth_model_names):
-            return None
-        return self.cbo_depth_model.GetString(selection)
+        kind, value = self.selected_depth_entry()
+        return value if kind == DEPTH_MODEL else None
 
     @property
     def depth_file(self):
-        if self.depth_file_path and self.cbo_depth_model.GetSelection() == self.depth_file_index:
-            return self.depth_file_path
-        return None
+        kind, value = self.selected_depth_entry()
+        return value if kind == DEPTH_FILE else None
 
     def set_depth_file(self, file_path, select=True):
-        """Adds the file to the choice, replacing one already there."""
-        if self.depth_file_path:
-            self.cbo_depth_model.Delete(self.depth_file_index)
+        """Puts the file in the choice, replacing one already there."""
+        previous = self.selected_depth_entry()
         self.depth_file_path = file_path
-        if not file_path:
-            return
-        index = len(self.depth_model_names) + 1
-        self.cbo_depth_model.Insert(path.basename(file_path), index)
-        self.cbo_depth_model.SetToolTip(file_path)
-        if select:
-            self.cbo_depth_model.SetSelection(index)
+        if select and file_path:
+            self.rebuild_depth_choice(DEPTH_FILE, file_path)
+        else:
+            self.rebuild_depth_choice(*previous)
 
     def choose_depth_file(self):
         with wx.FileDialog(self, T("Depth file"), wildcard=DEPTH_WILDCARD,
@@ -303,13 +339,11 @@ class PreviewFrame(wx.Frame):
 
         depth_model = state.get("depth_model")
         if depth_model:
-            # the model may not be offered any more, in which case keep the default
-            index = self.cbo_depth_model.FindString(depth_model)
-            if index != wx.NOT_FOUND:
-                self.cbo_depth_model.SetSelection(index)
+            # the model may not be offered any more; select_depth_entry falls
+            # back to "same as main" when it is gone
+            self.select_depth_model(depth_model)
         elif state.get("depth_from_file") and self.depth_file_path:
-            self.cbo_depth_model.SetSelection(self.depth_file_index)
-        self.depth_selection = self.cbo_depth_model.GetSelection()
+            self.select_depth_entry(DEPTH_FILE, self.depth_file_path)
 
         # Auto being on is not a reason to render as soon as the window opens:
         # seed the snapshot so it only fires once something actually changes
@@ -639,7 +673,7 @@ class PreviewFrame(wx.Frame):
             self.request_render()
 
     def on_changed_depth_model(self, event):
-        if self.cbo_depth_model.GetSelection() == self.browse_index:
+        if self.selected_depth_entry()[0] == DEPTH_BROWSE:
             if not self.choose_depth_file():
                 # cancelled: go back to whatever was selected before
                 self.cbo_depth_model.SetSelection(self.depth_selection)
