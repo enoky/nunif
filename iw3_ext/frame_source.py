@@ -6,6 +6,21 @@ from iw3.utils import is_video, is_text, is_yaml
 from .pipeline import PreviewError
 
 
+class SourceInfo():
+    """What the window needs to know about the frame that was rendered."""
+
+    __slots__ = ("file_path", "is_video", "position", "start_time", "end_time", "duration")
+
+    def __init__(self, file_path, is_video=False, position=None,
+                 start_time=None, end_time=None, duration=None):
+        self.file_path = file_path
+        self.is_video = is_video
+        self.position = position
+        self.start_time = start_time
+        self.end_time = end_time
+        self.duration = duration
+
+
 def resolve_source_path(input_path):
     """Maps whatever is in the input box to the single file the preview renders."""
     if not input_path:
@@ -43,10 +58,17 @@ def scale_source(x, scale):
                      interpolation=InterpolationMode.BICUBIC, antialias=True).clamp(0, 1)
 
 
-def load_source_image(file_path, args, device, scale=100):
+def load_source_frame(file_path, args, device, scale=100, seek=0.0, video_cache=None):
+    """Returns (CHW float tensor on device, SourceInfo)."""
     if is_video(file_path):
-        # phase 3
-        raise PreviewError("Video preview is not implemented yet")
+        if video_cache is None:
+            raise PreviewError("No video cache available")
+        source = video_cache.get(file_path, args, device)
+        x, position = source.grab(seek)
+        info = SourceInfo(file_path, is_video=True, position=position,
+                          start_time=source.start_time, end_time=source.end_time,
+                          duration=source.duration)
+        return scale_source(x, scale), info
 
     im, _ = load_image_simple(file_path, color="rgb",
                               exif_transpose=not args.disable_exif_transpose)
@@ -54,4 +76,4 @@ def load_source_image(file_path, args, device, scale=100):
         raise PreviewError(f"Could not load {file_path}")
 
     x = TF.to_tensor(im).to(device)
-    return scale_source(x, scale)
+    return scale_source(x, scale), SourceInfo(file_path)

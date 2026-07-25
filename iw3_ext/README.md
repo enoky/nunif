@@ -37,7 +37,7 @@ git diff --stat dev -- . ":(exclude)iw3_ext"
 | --- | --- | --- |
 | 1 | Button injection, preview window shell, launcher | done |
 | 2 | Render pipeline, image input, worker thread, canvas, view modes, save | done |
-| 3 | Video input and seek bar | not started |
+| 3 | Video input and seek bar | done |
 | 4 | Auto-refresh on main-window setting changes, preview-only depth model | not started |
 | 5 | Persisted window state, translations | not started |
 
@@ -46,7 +46,14 @@ changes (view, scale, seek); changes in the main window still need `Refresh`.
 
 The rendered frame is byte-identical to what `Start` writes for that frame: a
 256x256 test image rendered through the preview and through `python -m iw3` with
-the same settings compared at a max absolute difference of 0.
+the same settings compared at a max absolute difference of 0. Video frames are
+decoded through the same path a conversion uses, verified against `hook_frame()`
+at several seek positions, also at a max absolute difference of 0.
+
+For video the slider spans the Start/End time range when one is set. Three things
+a still preview cannot reproduce are listed at the top of `video_source.py`:
+Max FPS frame dropping, Auto Crop analysis over the whole file, and Flicker
+Reduction, which works across frames (the window says so when it is on).
 
 ## Layout
 
@@ -56,6 +63,7 @@ the same settings compared at a max absolute difference of 0.
 | `preview_frame.py` | The Live Preview window: toolbar, canvas, seek bar, status bar, render requests. |
 | `pipeline.py` | Mirror of the model setup in `iw3_main()`, plus the view-mode handling. |
 | `frame_source.py` | Turns the input path into the single frame that gets rendered. |
+| `video_source.py` | Seeks a video and decodes one frame the way a conversion would. |
 | `render_worker.py` | Background render thread with a one-slot request queue. |
 | `model_cache.py` | Keeps the stereo model loaded between renders. |
 | `image_canvas.py` | Fit/100% zoom, wheel zoom, drag pan. |

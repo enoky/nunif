@@ -11,25 +11,34 @@ from .image_canvas import ImageCanvas, pil_to_wx_image
 from .model_cache import ModelCache
 from .pipeline import PreviewError
 from .render_worker import RenderWorker, RenderRequest
+from .video_source import VideoSourceCache
 from .view_modes import VIEW_MODES
 
 
 PREVIEW_SCALES = (100, 50, 25)
 SEEK_TICKS = 1000
+EMA_NOTE = "Flicker Reduction works across frames, so a single frame cannot show it."
 
 
 def T(s):
     return iw3_gui.T(s)
 
 
-class RenderResult():
-    __slots__ = ("image", "elapsed", "note", "source_path", "args")
+def format_time(seconds):
+    if seconds is None:
+        return "--:--:--"
+    seconds = max(0.0, float(seconds))
+    return f"{int(seconds // 3600):02d}:{int((seconds % 3600) // 60):02d}:{seconds % 60:04.1f}"
 
-    def __init__(self, image, elapsed, note, source_path, args):
+
+class RenderResult():
+    __slots__ = ("image", "elapsed", "note", "info", "args")
+
+    def __init__(self, image, elapsed, note, info, args):
         self.image = image
         self.elapsed = elapsed
         self.note = note
-        self.source_path = source_path
+        self.info = info
         self.args = args
 
 
@@ -47,9 +56,13 @@ class PreviewFrame(wx.Frame):
         self.main_frame = main_frame
         self.on_close_callback = on_close
         self.seek_position = 0.0
+        self.source_input_path = None
+        self.source_start = None
+        self.source_end = None
         self.render_seq = 0
         self.pil_image = None
         self.model_cache = ModelCache()
+        self.video_cache = VideoSourceCache()
         self.worker = RenderWorker(self.render, self.on_render_done, self.on_render_error)
         self.SetMinSize((640, 400))
 
@@ -102,8 +115,8 @@ class PreviewFrame(wx.Frame):
         # seek bar (video input only)
         self.pnl_seek = wx.Panel(self)
         self.sld_seek = wx.Slider(self.pnl_seek, value=0, minValue=0, maxValue=SEEK_TICKS)
-        self.lbl_seek = wx.StaticText(self.pnl_seek, label="0.0%", style=wx.ALIGN_RIGHT)
-        self.lbl_seek.SetMinSize((72, -1))
+        self.lbl_seek = wx.StaticText(self.pnl_seek, label=self.seek_label(), style=wx.ALIGN_RIGHT)
+        self.lbl_seek.SetMinSize((180, -1))
 
         layout = wx.BoxSizer(wx.HORIZONTAL)
         layout.Add(self.sld_seek, 1, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 4)
@@ -155,6 +168,14 @@ class PreviewFrame(wx.Frame):
     def is_busy(self):
         return self.worker.is_busy()
 
+    def seek_seconds(self):
+        if self.source_start is None or self.source_end is None:
+            return None
+        return self.source_start + (self.source_end - self.source_start) * self.seek_position
+
+    def seek_label(self):
+        return f"{format_time(self.seek_seconds())} / {format_time(self.source_end)}"
+
     def update_image_controls(self):
         enable = self.canvas.has_image()
         self.btn_zoom_fit.Enable(enable)
@@ -163,6 +184,13 @@ class PreviewFrame(wx.Frame):
 
     def update_source_state(self):
         input_path = self.main_frame.pnl_file.input_path
+        if input_path != self.source_input_path:
+            # a different file: the timeline is unknown again until it renders
+            self.source_input_path = input_path
+            self.source_start = None
+            self.source_end = None
+            self.lbl_seek.SetLabel(self.seek_label())
+
         title = T("Live Preview")
         if input_path:
             title += " - " + path.basename(path.normpath(input_path))
@@ -216,13 +244,17 @@ class PreviewFrame(wx.Frame):
         args = request.args
         source_path = frame_source.resolve_source_path(request.input_path)
         args, note = pipeline.prepare_args(args, request.view_mode)
-        x = frame_source.load_source_image(source_path, args, args.state["device"], request.scale)
+        x, info = frame_source.load_source_frame(
+            source_path, args, args.state["device"],
+            scale=request.scale, seek=request.seek, video_cache=self.video_cache)
+        if info.is_video and getattr(args, "ema_normalize", False) and not note:
+            note = EMA_NOTE
 
         start_time = time()
         image = pipeline.render(args, x, args.state["depth_model"], self.model_cache,
                                 request.view_mode, status_fn=status_fn)
         return RenderResult(image=image, elapsed=time() - start_time, note=note,
-                            source_path=source_path, args=args)
+                            info=info, args=args)
 
     def is_stale(self, request):
         """True when the window is gone or a newer request has been submitted."""
@@ -254,7 +286,13 @@ class PreviewFrame(wx.Frame):
         self.main_frame.depth_model_height = args.resolution
         self.main_frame.depth_model_limit_resolution = args.limit_resolution
 
-        message = result.note if result.note else path.basename(result.source_path)
+        info = result.info
+        if info.is_video:
+            self.source_start = info.start_time
+            self.source_end = info.end_time
+            self.lbl_seek.SetLabel(self.seek_label())
+
+        message = result.note if result.note else path.basename(info.file_path)
         self.set_status(message)
         self.set_info(f"{result.image.width}x{result.image.height}  "
                       f"{result.elapsed * 1000:.0f} ms")
@@ -289,7 +327,7 @@ class PreviewFrame(wx.Frame):
 
     def on_changed_seek(self, event):
         self.seek_position = self.sld_seek.GetValue() / SEEK_TICKS
-        self.lbl_seek.SetLabel(f"{self.seek_position * 100:.1f}%")
+        self.lbl_seek.SetLabel(self.seek_label())
         if self.auto_refresh:
             self.request_render()
 
@@ -332,6 +370,10 @@ class PreviewFrame(wx.Frame):
 
     def free_models(self, include_depth_model=False):
         self.model_cache.clear()
+        if self.worker.is_busy():
+            self.video_cache.release()
+        else:
+            self.video_cache.close()
         if include_depth_model:
             # same fields MainFrame.parse_args() resets when the model changes
             self.main_frame.depth_model = None
