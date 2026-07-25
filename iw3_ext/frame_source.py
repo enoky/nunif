@@ -9,10 +9,12 @@ from .pipeline import PreviewError
 class SourceInfo():
     """What the window needs to know about the frame that was rendered."""
 
-    __slots__ = ("file_path", "is_video", "position", "start_time", "end_time", "duration", "fps")
+    __slots__ = ("file_path", "is_video", "position", "start_time", "end_time", "duration",
+                 "fps", "index", "frames")
 
     def __init__(self, file_path, is_video=False, position=None,
-                 start_time=None, end_time=None, duration=None, fps=None):
+                 start_time=None, end_time=None, duration=None, fps=None,
+                 index=0, frames=1):
         self.file_path = file_path
         self.is_video = is_video
         self.position = position
@@ -20,6 +22,10 @@ class SourceInfo():
         self.end_time = end_time
         self.duration = duration
         self.fps = fps
+        # the frame that was read, counted from the start of the file. A depth
+        # file is read by this same number, so the two cannot round apart
+        self.index = index
+        self.frames = frames
 
 
 def resolve_source_path(input_path):
@@ -59,10 +65,15 @@ def scale_source(x, scale):
                      interpolation=InterpolationMode.BICUBIC, antialias=True).clamp(0, 1)
 
 
-def load_source_frame(file_path, args, device, scale=100, seek=0.0, video_cache=None,
-                      warmup=0, warmup_short_side=None):
+def load_source_frame(file_path, args, device, scale=100, seek=0.0, seek_index=None,
+                      video_cache=None, warmup=0, warmup_short_side=None):
     """
     Returns (CHW float tensor on device, warmup frames, SourceInfo).
+
+    seek_index picks the frame outright, which is how the window asks once the
+    slider counts frames. Seeking by position instead leaves the frame to
+    rounding, and a depth file read by index would then pair with the frame
+    next door.
 
     warmup frames are the ones preceding it, oldest first, for the temporal
     depth models. Image input has none: those models fall back to bootstrapping
@@ -72,11 +83,16 @@ def load_source_frame(file_path, args, device, scale=100, seek=0.0, video_cache=
         if video_cache is None:
             raise PreviewError("No video cache available")
         source = video_cache.get(file_path, args, device)
-        x, warmup_frames, position = source.grab(
-            seek, warmup=warmup, warmup_short_side=warmup_short_side)
+        frames = source.range_frames()
+        if seek_index is None:
+            seek_index = int(round(seek * max(0, frames - 1)))
+        index = source.start_index() + max(0, min(seek_index, frames - 1))
+        x, warmup_frames, position = source.grab_index(
+            index, warmup=warmup, warmup_short_side=warmup_short_side)
         info = SourceInfo(file_path, is_video=True, position=position,
                           start_time=source.start_time, end_time=source.end_time,
-                          duration=source.duration, fps=source.fps)
+                          duration=source.duration, fps=source.fps,
+                          index=index, frames=frames)
         return scale_source(x, scale), warmup_frames, info
 
     im, _ = load_image_simple(file_path, color="rgb",

@@ -153,6 +153,16 @@ class VideoSource():
         x, warmup_frames = self._decode_at(target_sec, warmup, warmup_short_side)
         return x, warmup_frames, target_sec
 
+    def start_index(self):
+        """The first frame of the Start/End range, counted from the file's start."""
+        return int(round(self.start_time * self.fps)) if self.fps else 0
+
+    def range_frames(self):
+        """How many frames the Start/End range holds."""
+        if not self.fps:
+            return 1
+        return max(1, int(round((self.end_time - self.start_time) * self.fps)))
+
     def grab_index(self, index, warmup=0, warmup_short_side=None):
         """
         The frame at a position counted in frames rather than seconds.

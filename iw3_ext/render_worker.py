@@ -5,10 +5,10 @@ import wx
 
 
 class RenderRequest():
-    __slots__ = ("seq", "args", "input_path", "view_mode", "scale", "seek",
+    __slots__ = ("seq", "args", "input_path", "view_mode", "scale", "seek", "seek_index",
                  "override", "share", "depth_file", "depth_from_main")
 
-    def __init__(self, seq, args, input_path, view_mode, scale, seek=0.0,
+    def __init__(self, seq, args, input_path, view_mode, scale, seek=0.0, seek_index=None,
                  override=None, share=None, depth_file=None, depth_from_main=False):
         self.seq = seq
         self.args = args
@@ -16,6 +16,8 @@ class RenderRequest():
         self.view_mode = view_mode
         self.scale = scale
         self.seek = seek
+        # the frame number, when the slider counts frames
+        self.seek_index = seek_index
         # preview-only depth model, and the main window's model state to restore
         self.override = override
         self.share = share or {}

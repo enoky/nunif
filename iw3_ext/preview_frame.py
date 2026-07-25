@@ -230,6 +230,16 @@ class PreviewFrame(wx.Frame):
     def auto_refresh(self):
         return self.chk_auto.GetValue()
 
+    @property
+    def seek_index(self):
+        """
+        The slider's value as a frame number, once it counts frames.
+
+        Before the first render the range is still in ticks, and the position
+        is used instead.
+        """
+        return None if self.sld_seek.GetMax() == SEEK_TICKS else self.sld_seek.GetValue()
+
     # The depth choice is built from typed entries rather than fixed positions,
     # so the order can change without index arithmetic spreading through the
     # window. It reads: the file dialog, the chosen file if there is one, "same
@@ -401,15 +411,17 @@ class PreviewFrame(wx.Frame):
         return label
 
     def update_seek_range(self, info):
-        """One tick per frame, so the arrow keys step a frame at a time."""
-        if not (info.is_video and info.fps and info.start_time is not None):
+        """
+        One tick per frame, so the arrow keys step a frame at a time and the
+        slider's value is the frame number itself: 0 to frames - 1.
+        """
+        if not (info.is_video and info.fps and info.frames):
             return
-        frames = int(round((info.end_time - info.start_time) * info.fps))
-        frames = max(1, min(frames, MAX_SEEK_TICKS))
-        if self.sld_seek.GetMax() == frames:
+        last = max(0, min(info.frames, MAX_SEEK_TICKS) - 1)
+        if self.sld_seek.GetMax() == last:
             return
-        self.sld_seek.SetRange(0, frames)
-        self.sld_seek.SetValue(int(round(self.seek_position * frames)))
+        self.sld_seek.SetRange(0, last)
+        self.sld_seek.SetValue(int(round(self.seek_position * last)))
 
     def seek_ticks(self):
         return max(1, self.sld_seek.GetMax())
@@ -547,6 +559,7 @@ class PreviewFrame(wx.Frame):
             view_mode=self.view_mode,
             scale=self.preview_scale,
             seek=self.seek_position,
+            seek_index=self.seek_index,
             override=override,
             share=share,
             depth_file=self.depth_file,
@@ -568,7 +581,8 @@ class PreviewFrame(wx.Frame):
         warmup = 0 if request.depth_file else vda.warmup_frame_count(depth_model)
         x, warmup_frames, info = frame_source.load_source_frame(
             source_path, args, args.state["device"],
-            scale=request.scale, seek=request.seek, video_cache=self.video_cache,
+            scale=request.scale, seek=request.seek, seek_index=request.seek_index,
+            video_cache=self.video_cache,
             warmup=warmup, warmup_short_side=vda.warmup_frame_size(args))
 
         if request.depth_file:
@@ -593,12 +607,9 @@ class PreviewFrame(wx.Frame):
 
     def load_depth_file(self, request, args, info, status_fn=None):
         """Runs on the worker thread: reads the frame that matches the colour one."""
-        if info.is_video:
-            if not info.fps:
-                raise PreviewError("The video has no frame rate, so a depth file cannot be lined up")
-            index = int(round(info.position * info.fps))
-        else:
-            index = 0
+        # the same frame number the colour frame was read with, not a second
+        # rounding of the same timestamp
+        index = info.index if info.is_video else 0
 
         if status_fn is not None:
             status_fn(f"Reading depth frame {index}...")
