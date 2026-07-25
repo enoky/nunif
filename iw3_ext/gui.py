@@ -3,10 +3,13 @@
 import iw3.gui as iw3_gui
 import wx
 from . import compat
-from .preview_frame import PreviewFrame
-
 
 compat.check_gui_module(iw3_gui)
+
+try:
+    from .preview_frame import PreviewFrame
+except ImportError as e:
+    raise compat.import_error(e) from e
 
 
 def T(s):

@@ -1,0 +1,57 @@
+from os import path
+from torchvision.transforms import functional as TF, InterpolationMode
+from nunif.utils.image_loader import ImageLoader
+from nunif.utils.pil_io import load_image_simple
+from iw3.utils import is_video, is_text, is_yaml
+from .pipeline import PreviewError
+
+
+def resolve_source_path(input_path):
+    """Maps whatever is in the input box to the single file the preview renders."""
+    if not input_path:
+        raise PreviewError("No input file selected")
+
+    if path.isdir(input_path):
+        files = ImageLoader.listdir(input_path)
+        if not files:
+            raise PreviewError("No image found in the input directory")
+        return files[0]
+
+    if is_yaml(input_path):
+        raise PreviewError("Preview does not support YAML (Export) input")
+
+    if is_text(input_path):
+        for line in open(input_path, mode="r", encoding="utf-8"):
+            line = line.strip()
+            if line and not line.startswith("#"):
+                return line
+        raise PreviewError("The input file list is empty")
+
+    if not path.exists(input_path):
+        raise PreviewError(f"Not found: {input_path}")
+
+    return input_path
+
+
+def scale_source(x, scale):
+    if scale >= 100:
+        return x
+    height, width = x.shape[-2:]
+    new_height = max(2, int(height * scale / 100))
+    new_width = max(2, int(width * scale / 100))
+    return TF.resize(x, (new_height, new_width),
+                     interpolation=InterpolationMode.BICUBIC, antialias=True).clamp(0, 1)
+
+
+def load_source_image(file_path, args, device, scale=100):
+    if is_video(file_path):
+        # phase 3
+        raise PreviewError("Video preview is not implemented yet")
+
+    im, _ = load_image_simple(file_path, color="rgb",
+                              exif_transpose=not args.disable_exif_transpose)
+    if im is None:
+        raise PreviewError(f"Could not load {file_path}")
+
+    x = TF.to_tensor(im).to(device)
+    return scale_source(x, scale)

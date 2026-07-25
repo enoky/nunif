@@ -44,6 +44,21 @@ def _require(obj, target_name, api):
     )
 
 
+def import_error(exc):
+    """
+    Wraps an ImportError raised while loading iw3_ext.
+
+    The render path imports iw3.utils symbols by name, so an upstream rename
+    surfaces here rather than through the attribute checks below.
+    """
+    return UpstreamAPIError(
+        f"iw3_ext failed to load: {exc}\n"
+        f"If the name above belongs to iw3, upstream has renamed or moved it and\n"
+        f"iw3_ext needs updating (start with iw3_ext/pipeline.py).\n"
+        f"Otherwise a dependency is missing from the environment."
+    )
+
+
 def check_gui_module(module):
     _require(module, "iw3.gui", GUI_MODULE_API)
 

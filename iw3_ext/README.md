@@ -36,18 +36,30 @@ git diff --stat dev -- . ":(exclude)iw3_ext"
 | Phase | Content | State |
 | --- | --- | --- |
 | 1 | Button injection, preview window shell, launcher | done |
-| 2 | Render pipeline, image input, worker thread, image canvas | not started |
-| 3 | Video seek bar | not started |
-| 4 | Auto-refresh, zoom/pan, view modes, preview scale, save | not started |
+| 2 | Render pipeline, image input, worker thread, canvas, view modes, save | done |
+| 3 | Video input and seek bar | not started |
+| 4 | Auto-refresh on main-window setting changes, preview-only depth model | not started |
 | 5 | Persisted window state, translations | not started |
+
+Until phase 4, `Auto` only re-renders when a control in the preview window itself
+changes (view, scale, seek); changes in the main window still need `Refresh`.
+
+The rendered frame is byte-identical to what `Start` writes for that frame: a
+256x256 test image rendered through the preview and through `python -m iw3` with
+the same settings compared at a max absolute difference of 0.
 
 ## Layout
 
 | File | Role |
 | --- | --- |
 | `gui.py` | Entry point. Subclasses `MainFrame`, inserts the Live Preview button, owns the preview window lifetime. |
-| `preview_frame.py` | The Live Preview window: toolbar, canvas, seek bar, status bar. |
+| `preview_frame.py` | The Live Preview window: toolbar, canvas, seek bar, status bar, render requests. |
+| `pipeline.py` | Mirror of the model setup in `iw3_main()`, plus the view-mode handling. |
+| `frame_source.py` | Turns the input path into the single frame that gets rendered. |
+| `render_worker.py` | Background render thread with a one-slot request queue. |
+| `model_cache.py` | Keeps the stereo model loaded between renders. |
+| `image_canvas.py` | Fit/100% zoom, wheel zoom, drag pan. |
 | `compat.py` | Checks the upstream attributes this package depends on, and reports a readable error if iw3 changes. |
 
-`compat.py` and (from phase 2) `pipeline.py` are the only files coupled to iw3
-internals. If an upstream update breaks something, look there first.
+`pipeline.py` and `compat.py` are the only files coupled to iw3 internals. If an
+upstream update breaks something, look there first.
