@@ -20,7 +20,24 @@ def find_sizer_index(sizer, window):
     return sizer.GetItemCount()
 
 
+# captured before main() points iw3.gui.MainFrame at the subclass below
+BASE_MAIN_FRAME = iw3_gui.MainFrame
+
+
 class PreviewMainFrame(iw3_gui.MainFrame):
+    def __init__(self):
+        # iw3's MainFrame.__init__ calls super(MainFrame, self).__init__(...),
+        # which looks MainFrame up in iw3.gui's globals at call time. main()
+        # points that global here so IW3App.OnInit builds this frame, which
+        # would make that super() call resolve to MainFrame itself and raise.
+        # Put the real class back while the constructor runs.
+        installed = iw3_gui.MainFrame
+        iw3_gui.MainFrame = BASE_MAIN_FRAME
+        try:
+            super().__init__()
+        finally:
+            iw3_gui.MainFrame = installed
+
     def initialize_component(self):
         super().initialize_component()
         self.preview_frame = None
