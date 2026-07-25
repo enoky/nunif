@@ -1,0 +1,30 @@
+---
+"_LOCALE": ["ja_JP"]
+"_NAME": "日本語"
+
+"Live Preview": "ライブプレビュー"
+"Refresh": "更新"
+"Auto": "自動"
+"Re-render when a setting changes": "設定を変更したら再描画する"
+"View": "表示"
+"Scale": "スケール"
+"Downscale the source frame before processing": "処理前に入力フレームを縮小する"
+"Render the preview with a different depth model than the conversion": "変換とは別の深度推定モデルでプレビューを描画する"
+"Same as main": "メイン画面と同じ"
+"Fit": "全体表示"
+"Save Image": "画像を保存"
+"Free VRAM": "VRAMを解放"
+
+"Result": "結果"
+"Left Eye": "左目"
+"Right Eye": "右目"
+
+"Press Refresh to render": "「更新」で描画します"
+"Rendering": "描画中"
+"Check the settings": "設定を確認してください"
+"Saved": "保存しました"
+"Freed the loaded models": "読み込み済みモデルを解放しました"
+"A conversion is running. Preview is paused until it finishes.": "変換の実行中です。完了までプレビューは停止します"
+"A preview render is still running. Wait for it to finish.": "プレビューの描画中です。完了までお待ちください"
+"Flicker Reduction works across frames, so a single frame cannot show it.": "ちらつき軽減は複数フレームにまたがる処理のため、1フレームでは確認できません"
+"Export mode has no image output. Showing the depth map.": "エクスポートには画像出力がないため、深度マップを表示します"

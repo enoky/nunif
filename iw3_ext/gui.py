@@ -7,13 +7,10 @@ from . import compat
 compat.check_gui_module(iw3_gui)
 
 try:
+    from .locales import T
     from .preview_frame import PreviewFrame
 except ImportError as e:
     raise compat.import_error(e) from e
-
-
-def T(s):
-    return iw3_gui.T(s)
 
 
 def find_sizer_index(sizer, window):

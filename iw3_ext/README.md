@@ -39,7 +39,7 @@ git diff --stat dev -- . ":(exclude)iw3_ext"
 | 2 | Render pipeline, image input, worker thread, canvas, view modes, save | done |
 | 3 | Video input and seek bar | done |
 | 4 | Auto-refresh on main-window setting changes, preview-only depth model | done |
-| 5 | Persisted window state, translations | not started |
+| 5 | Persisted window state, translations | done |
 
 With `Auto` on, the window watches the main window and re-renders about half a
 second after a setting stops changing. It does that by walking the controls
@@ -53,6 +53,17 @@ before converting with a large one. It never reaches the main window: an
 override is cached separately and `Start` keeps using the model you chose there.
 The list excludes the VideoDepthAnything models, which cannot render a single
 frame.
+
+Window size, position and the toolbar settings are kept in
+`<config dir>/iw3-gui-preview.json`, separate from the main window's preset file
+for the reason given at the top of `preview_frame.py`. A damaged state file is
+ignored, and a position on a display that is no longer connected is dropped.
+Restoring `Auto` as on does not render on open: it takes a real setting change.
+
+Strings the preview adds are translated in `locales/`, falling back to iw3's own
+table (so `Depth`, `Save` and friends match the rest of the GUI) and then to
+English. English and Japanese are filled in; adding a language means dropping a
+`.yml` next to the others.
 
 The rendered frame is byte-identical to what `Start` writes for that frame: a
 256x256 test image rendered through the preview and through `python -m iw3` with
@@ -77,6 +88,8 @@ Reduction, which works across frames (the window says so when it is on).
 | `render_worker.py` | Background render thread with a one-slot request queue. |
 | `model_cache.py` | Keeps the stereo model, and any preview-only depth model, loaded between renders. |
 | `settings_watcher.py` | Cheap change detection over the main window's controls, for `Auto`. |
+| `window_state.py` | The preview window's own settings file. |
+| `locales/` | Translations for the strings the preview adds. |
 | `image_canvas.py` | Fit/100% zoom, wheel zoom, drag pan. |
 | `compat.py` | Checks the upstream attributes this package depends on, and reports a readable error if iw3 changes. |
 

@@ -12,9 +12,11 @@ from .image_canvas import ImageCanvas, pil_to_wx_image
 from .model_cache import ModelCache
 from .pipeline import PreviewError
 from .render_worker import RenderWorker, RenderRequest
+from .locales import T
 from .settings_watcher import settings_snapshot
 from .video_source import VideoSourceCache
 from .view_modes import VIEW_MODES
+from .window_state import load_state, save_state, is_valid_size, is_visible_position
 
 
 PREVIEW_SCALES = (100, 50, 25)
@@ -38,10 +40,6 @@ def image_capable_depth_models(main_frame):
         except Exception:  # noqa
             continue
     return names
-
-
-def T(s):
-    return iw3_gui.T(s)
 
 
 def format_time(seconds):
@@ -89,6 +87,7 @@ class PreviewFrame(wx.Frame):
         self.SetMinSize((900, 420))
 
         self.initialize_component()
+        self.restore_window_state()
         if is_dark_mode():
             apply_dark_mode(self)
         set_icon_ex(self, path.join(path.dirname(iw3_gui.__file__), "icon.ico"), self.GetTitle())
@@ -213,6 +212,56 @@ class PreviewFrame(wx.Frame):
 
     def is_busy(self):
         return self.worker.is_busy()
+
+    def restore_window_state(self):
+        state = load_state()
+
+        size = state.get("size")
+        if is_valid_size(size):
+            self.SetSize(size[0], size[1])
+        position = state.get("position")
+        if is_visible_position(position):
+            self.SetPosition(wx.Point(position[0], position[1]))
+        if state.get("maximized"):
+            self.Maximize(True)
+
+        self.chk_auto.SetValue(bool(state.get("auto", False)))
+
+        view = state.get("view")
+        for index, (mode, _) in enumerate(VIEW_MODES):
+            if mode == view:
+                self.cbo_view.SetSelection(index)
+                break
+
+        scale = state.get("scale")
+        if scale in PREVIEW_SCALES:
+            self.cbo_scale.SetSelection(PREVIEW_SCALES.index(scale))
+
+        depth_model = state.get("depth_model")
+        if depth_model:
+            # the model may not be offered any more, in which case keep the default
+            index = self.cbo_depth_model.FindString(depth_model)
+            if index != wx.NOT_FOUND:
+                self.cbo_depth_model.SetSelection(index)
+
+        # Auto being on is not a reason to render as soon as the window opens:
+        # seed the snapshot so it only fires once something actually changes
+        self.applied_snapshot = self.pending_snapshot = self.take_snapshot()
+
+    def collect_window_state(self):
+        state = dict(
+            maximized=self.IsMaximized(),
+            auto=self.auto_refresh,
+            view=self.view_mode,
+            scale=self.preview_scale,
+            depth_model=self.depth_model_override,
+        )
+        if not (self.IsMaximized() or self.IsIconized()):
+            size = self.GetSize()
+            position = self.GetPosition()
+            state["size"] = [size.width, size.height]
+            state["position"] = [position.x, position.y]
+        return state
 
     def seek_seconds(self):
         if self.source_start is None or self.source_end is None:
@@ -372,7 +421,7 @@ class PreviewFrame(wx.Frame):
             self.source_end = info.end_time
             self.lbl_seek.SetLabel(self.seek_label())
 
-        message = result.note if result.note else path.basename(info.file_path)
+        message = T(result.note) if result.note else path.basename(info.file_path)
         if request.override is not None:
             message += f"  [{request.override}]"
         self.set_status(message)
@@ -494,9 +543,10 @@ class PreviewFrame(wx.Frame):
     def close_now(self):
         """Close without notifying the main frame (used while it is shutting down)."""
         self.on_close_callback = None
-        self.Destroy()
+        self.on_close(None)
 
     def on_close(self, event):
+        save_state(self.collect_window_state())
         if self.on_close_callback is not None:
             self.on_close_callback()
             self.on_close_callback = None
