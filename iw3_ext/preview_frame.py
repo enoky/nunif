@@ -29,6 +29,8 @@ SEEK_DEBOUNCE_MS = 150
 POLL_INTERVAL_MS = 400
 SAME_AS_MAIN = "Same as main"
 DEPTH_FILE_LABEL = "Depth file..."
+FROM_MAIN = "from the main window"
+PREVIEW_ONLY = "preview only"
 # entry kinds in the Depth choice
 DEPTH_BROWSE = "browse"
 DEPTH_FILE = "file"
@@ -254,7 +256,7 @@ class PreviewFrame(wx.Frame):
         """Refills the choice and selects the entry of the given kind."""
         self.depth_entries = self.build_depth_entries()
         self.cbo_depth_model.Set([self.depth_entry_label(*entry) for entry in self.depth_entries])
-        self.cbo_depth_model.SetToolTip(self.depth_file_path or None)
+        self.update_depth_tooltip()
         self.select_depth_entry(kind, value)
 
     def select_depth_entry(self, kind, value=None):
@@ -285,9 +287,29 @@ class PreviewFrame(wx.Frame):
         return value if kind == DEPTH_MODEL else None
 
     @property
+    def main_depth_file(self):
+        """The depth file the main window would convert with, if it has one."""
+        return getattr(self.main_frame, "conversion_depth_file", None)
+
+    @property
     def depth_file(self):
+        """
+        The depth file to render with.
+
+        "Same as main" means what Start would do, which is the main window's
+        depth file when it has one. Choosing a file here overrides that for the
+        preview only, the same way choosing a model does.
+        """
         kind, value = self.selected_depth_entry()
-        return value if kind == DEPTH_FILE else None
+        if kind == DEPTH_FILE:
+            return value
+        if kind == DEPTH_MAIN:
+            return self.main_depth_file
+        return None
+
+    @property
+    def depth_file_from_main(self):
+        return self.selected_depth_entry()[0] == DEPTH_MAIN and bool(self.main_depth_file)
 
     def set_depth_file(self, file_path, select=True):
         """Puts the file in the choice, replacing one already there."""
@@ -398,7 +420,17 @@ class PreviewFrame(wx.Frame):
         self.btn_zoom_100.Enable(enable)
         self.btn_save.Enable(enable)
 
+    def update_depth_tooltip(self):
+        """Says what "same as main" currently resolves to."""
+        lines = []
+        if self.main_depth_file:
+            lines.append(T(SAME_AS_MAIN) + ": " + path.basename(self.main_depth_file))
+        if self.depth_file_path:
+            lines.append(self.depth_file_path)
+        self.cbo_depth_model.SetToolTip("\n".join(lines) if lines else None)
+
     def update_source_state(self):
+        self.update_depth_tooltip()
         input_path = self.main_frame.pnl_file.input_path
         if input_path != self.source_input_path:
             # a different file: the timeline is unknown again until it renders
@@ -518,6 +550,7 @@ class PreviewFrame(wx.Frame):
             override=override,
             share=share,
             depth_file=self.depth_file,
+            depth_from_main=self.depth_file_from_main,
         ))
         self.set_status(T("Rendering") + "...")
 
@@ -615,7 +648,8 @@ class PreviewFrame(wx.Frame):
         if request.override is not None:
             message += f"  [{request.override}]"
         elif request.depth_file is not None:
-            message += f"  [{T('Depth')}: {path.basename(request.depth_file)}]"
+            source = T(FROM_MAIN) if request.depth_from_main else T(PREVIEW_ONLY)
+            message += f"  [{T('Depth')}: {path.basename(request.depth_file)} - {source}]"
             if self.model_cache.file_depth_model is not None and \
                     self.model_cache.file_depth_model.aspect_mismatch:
                 message = T(ASPECT_NOTE) + "  " + message
@@ -645,7 +679,9 @@ class PreviewFrame(wx.Frame):
 
     def take_snapshot(self):
         try:
-            return settings_snapshot(self.main_frame)
+            # the main window's depth file is held on the frame, not in a
+            # control, so the generic walk cannot see it changing
+            return (settings_snapshot(self.main_frame), self.main_depth_file)
         except RuntimeError:
             # the main window is going away
             return None

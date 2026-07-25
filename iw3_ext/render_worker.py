@@ -6,10 +6,10 @@ import wx
 
 class RenderRequest():
     __slots__ = ("seq", "args", "input_path", "view_mode", "scale", "seek",
-                 "override", "share", "depth_file")
+                 "override", "share", "depth_file", "depth_from_main")
 
     def __init__(self, seq, args, input_path, view_mode, scale, seek=0.0,
-                 override=None, share=None, depth_file=None):
+                 override=None, share=None, depth_file=None, depth_from_main=False):
         self.seq = seq
         self.args = args
         self.input_path = input_path
@@ -19,8 +19,10 @@ class RenderRequest():
         # preview-only depth model, and the main window's model state to restore
         self.override = override
         self.share = share or {}
-        # depth map rendered outside iw3, used instead of a model
+        # depth map rendered outside iw3, used instead of a model, and whether
+        # it came from the main window rather than being chosen here
         self.depth_file = depth_file
+        self.depth_from_main = depth_from_main
 
 
 class RenderWorker():

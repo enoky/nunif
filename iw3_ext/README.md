@@ -124,6 +124,11 @@ the colour frame and the depth would need the identical one.
 `Depth file...` in the main window, next to `Live Preview`, makes `Start`
 convert from a depth file rather than a model.
 
+`Same as main` in the preview follows it, since that entry means whatever
+`Start` would do. Choosing a file in the preview overrides it for the preview
+only, the same as choosing a model there, and the status bar says which of the
+two is in force.
+
 A conversion cannot pair frames the way the preview does. iw3 calls
 `depth_model.infer(x)` with pixels alone, no frame identity, and runs those
 calls concurrently, so pairing by call order would be a race, and one colour

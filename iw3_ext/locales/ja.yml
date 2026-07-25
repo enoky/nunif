@@ -11,6 +11,8 @@
 "Downscale the source frame before processing": "処理前に入力フレームを縮小する"
 "Render the preview with a different depth model than the conversion": "変換とは別の深度推定モデルでプレビューを描画する"
 "Same as main": "メイン画面と同じ"
+"from the main window": "メイン画面から"
+"preview only": "プレビューのみ"
 "Fit": "全体表示"
 "Save Image": "画像を保存"
 "Free VRAM": "VRAMを解放"
