@@ -47,6 +47,10 @@ class PreviewMainFrame(iw3_gui.MainFrame):
         super().initialize_component()
         self.preview_frame = None
         self.conversion_depth_file = None
+        # the preview's own depth file lives here so that closing and reopening
+        # the window keeps it, while a new session starts without one
+        self.preview_depth_file = None
+        self.preview_depth_selected = False
         # holds the file-backed depth model used by a conversion, separate from
         # the preview's own cache
         self.depth_file_cache = ModelCache()

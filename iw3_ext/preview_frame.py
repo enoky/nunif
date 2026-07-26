@@ -96,7 +96,10 @@ class PreviewFrame(wx.Frame):
         self.source_end = None
         self.render_seq = 0
         self.pil_image = None
-        self.depth_file_path = None
+        # a depth file chosen here lasts for the session, not beyond it: the
+        # main window holds it while this window is closed and reopened, and
+        # collect_window_state() deliberately does not write it to disk
+        self.depth_file_path = self.remembered_depth_file(main_frame)
         self.depth_entries = []
         self.depth_selection = 0
         self.model_cache = ModelCache()
@@ -321,6 +324,17 @@ class PreviewFrame(wx.Frame):
     def depth_file_from_main(self):
         return self.selected_depth_entry()[0] == DEPTH_MAIN and bool(self.main_depth_file)
 
+    @staticmethod
+    def remembered_depth_file(main_frame):
+        """What was chosen earlier in this session, if it is still there."""
+        file_path = getattr(main_frame, "preview_depth_file", None)
+        return file_path if file_path and path.exists(file_path) else None
+
+    def remember_depth_file(self):
+        """Holds the choice on the main window, which outlives this one."""
+        self.main_frame.preview_depth_file = self.depth_file_path
+        self.main_frame.preview_depth_selected = self.selected_depth_entry()[0] == DEPTH_FILE
+
     def set_depth_file(self, file_path, select=True):
         """Puts the file in the choice, replacing one already there."""
         previous = self.selected_depth_entry()
@@ -329,6 +343,7 @@ class PreviewFrame(wx.Frame):
             self.rebuild_depth_choice(DEPTH_FILE, file_path)
         else:
             self.rebuild_depth_choice(*previous)
+        self.remember_depth_file()
 
     def choose_depth_file(self):
         with wx.FileDialog(self, T("Depth file"), wildcard=DEPTH_WILDCARD,
@@ -365,16 +380,13 @@ class PreviewFrame(wx.Frame):
         if scale in PREVIEW_SCALES:
             self.cbo_scale.SetSelection(PREVIEW_SCALES.index(scale))
 
-        saved_depth_file = state.get("depth_file")
-        if saved_depth_file and path.exists(saved_depth_file):
-            self.set_depth_file(saved_depth_file, select=False)
-
         depth_model = state.get("depth_model")
         if depth_model:
             # the model may not be offered any more; select_depth_entry falls
             # back to "same as main" when it is gone
             self.select_depth_model(depth_model)
-        elif state.get("depth_from_file") and self.depth_file_path:
+        elif self.depth_file_path and getattr(self.main_frame, "preview_depth_selected", False):
+            # chosen earlier in this session, not read back from disk
             self.select_depth_entry(DEPTH_FILE, self.depth_file_path)
 
         # Auto being on is not a reason to render as soon as the window opens:
@@ -388,8 +400,9 @@ class PreviewFrame(wx.Frame):
             view=self.view_mode,
             scale=self.preview_scale,
             depth_model=self.depth_model_override,
-            depth_file=self.depth_file_path,
-            depth_from_file=self.depth_file is not None,
+            # the depth file is deliberately absent: a new session starts
+            # without one, and it is remembered on the main window for as long
+            # as this one lasts
         )
         if not (self.IsMaximized() or self.IsIconized()):
             size = self.GetSize()
@@ -726,6 +739,7 @@ class PreviewFrame(wx.Frame):
                 self.cbo_depth_model.SetSelection(self.depth_selection)
                 return
         self.depth_selection = self.cbo_depth_model.GetSelection()
+        self.remember_depth_file()
         self.request_render(silent=True)
 
     def sync_seek_position(self):

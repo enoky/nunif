@@ -75,7 +75,10 @@ window says so in the status bar.
 
 Window size, position and the toolbar settings are kept in
 `<config dir>/iw3-gui-preview.json`, separate from the main window's preset file
-for the reason given at the top of `preview_frame.py`. A damaged state file is
+for the reason given at the top of `preview_frame.py`. A depth file chosen in
+the preview is deliberately not among them: it lasts for the session, held on
+the main window so closing and reopening the preview keeps it, and a new
+session starts without one. A damaged state file is
 ignored, and a position on a display that is no longer connected is dropped.
 Restoring `Auto` as on does not render on open: it takes a real setting change.
 
